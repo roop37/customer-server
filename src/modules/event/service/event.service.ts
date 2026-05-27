@@ -1,8 +1,19 @@
 import { Event, EventStatus } from "@hoizr-technology/shared";
 import { ErrorWithProps } from "mercurius";
-import { EventModel } from "../schema/event.schema";
+import { Types } from "mongoose";
+import { ArtistModel } from "../../artistFollow/schema/artist-follow.schema";
+import {
+  EventModel,
+  HostModel,
+  PhantomArtistModel,
+} from "../schema/event.schema";
 import { PublicEventFilterInput } from "../interfaces/event.input";
-import { PublicEventPaginatedResponse } from "../interfaces/event.objects";
+import {
+  PublicEventArtistEntry,
+  PublicEventOrganizerEntry,
+  PublicEventPaginatedResponse,
+  PublicEventPeopleResponse,
+} from "../interfaces/event.objects";
 
 const escapeRegex = (value: string): string =>
   value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -115,6 +126,159 @@ class PublicEventService {
     }
 
     return { events: filtered, total, page, pageSize };
+  }
+
+  /**
+   * People associated with an event: the lineup (real Artist rows or
+   * PhantomArtist stand-ins), the organizer (event.hostId → Host) and
+   * collaborators (event.eventCollaborationBusiness[].businessLinkId →
+   * Host). One query for the customer event detail page so the UI
+   * doesn't need to fan out client-side.
+   */
+  async getEventPeople(eventId: string): Promise<PublicEventPeopleResponse> {
+    if (!eventId) throw new ErrorWithProps("Event ID is required");
+
+    const event = await EventModel.findOne({
+      _id: eventId,
+      isDeleted: false,
+      isVisible: true,
+      status: EventStatus.PUBLISHED,
+      adminPaused: { $ne: true },
+    }).lean<Event>();
+
+    if (!event) return { artists: [], organizers: [] };
+
+    // ---------- Artists --------------------------------------------------
+    const lineup = (event.lineup ?? []).filter(Boolean);
+    const artistLinkIds = lineup
+      .map((l) => l.artistLinkId)
+      .filter((id): id is string => Boolean(id) && Types.ObjectId.isValid(id));
+    const phantomIds = lineup
+      .map((l) => l.tempArtistId)
+      .filter((id): id is string => Boolean(id) && Types.ObjectId.isValid(id));
+
+    const [artistRows, phantomRows] = await Promise.all([
+      artistLinkIds.length
+        ? ArtistModel.find({
+            _id: { $in: artistLinkIds },
+            isDeleted: false,
+          }).lean()
+        : Promise.resolve([] as any[]),
+      phantomIds.length
+        ? PhantomArtistModel.find({
+            _id: { $in: phantomIds },
+            isDeleted: false,
+          }).lean()
+        : Promise.resolve([] as any[]),
+    ]);
+
+    const artistById = new Map<string, any>(
+      artistRows.map((row: any) => [String(row._id), row])
+    );
+    const phantomById = new Map<string, any>(
+      phantomRows.map((row: any) => [String(row._id), row])
+    );
+
+    // Preserve lineup order so the "headliner first" intent the host
+    // expressed when arranging the line-up is what the customer sees.
+    const artists: PublicEventArtistEntry[] = lineup.map((entry) => {
+      const artist = entry.artistLinkId
+        ? artistById.get(String(entry.artistLinkId))
+        : null;
+      if (artist) {
+        const fullName = [artist.firstName, artist.lastName]
+          .filter(Boolean)
+          .join(" ")
+          .trim();
+        return {
+          _id: String(artist._id),
+          name: fullName || entry.name,
+          picture: artist.profilePhoto ?? entry.picture ?? undefined,
+          tagline: artist.tagline ?? undefined,
+          bio: artist.bio ?? undefined,
+          slug: artist.slug ?? undefined,
+          instagramLink: artist.instagramLink ?? entry.instagramLink,
+          spotifyLink: artist.spotifyLink ?? entry.spotifyLink,
+          youtubeLink: artist.youtubeLink ?? entry.youtubeLink,
+          isPhantom: false,
+        };
+      }
+      const phantom = entry.tempArtistId
+        ? phantomById.get(String(entry.tempArtistId))
+        : null;
+      if (phantom) {
+        return {
+          _id: String(phantom._id),
+          name: phantom.name ?? entry.name,
+          picture: phantom.picture ?? entry.picture ?? undefined,
+          instagramLink: phantom.instagramLink ?? entry.instagramLink,
+          spotifyLink: phantom.spotifyLink ?? entry.spotifyLink,
+          youtubeLink: phantom.youtubeLink ?? entry.youtubeLink,
+          isPhantom: true,
+        };
+      }
+      // Free-text entry — no Artist row, no PhantomArtist. Use the
+      // raw fields the host typed at lineup time.
+      return {
+        name: entry.name,
+        picture: entry.picture ?? undefined,
+        instagramLink: entry.instagramLink ?? undefined,
+        spotifyLink: entry.spotifyLink ?? undefined,
+        youtubeLink: entry.youtubeLink ?? undefined,
+        isPhantom: true,
+      };
+    });
+
+    // ---------- Organizer + collaborators ------------------------------
+    const collaborators = (event.eventCollaborationBusiness ?? []).filter(
+      (c) => !c.hideOnEventPage
+    );
+    const collabBusinessIds = collaborators
+      .map((c) => c.businessLinkId)
+      .filter((id): id is string => Boolean(id) && Types.ObjectId.isValid(id));
+
+    const allHostIds = [event.hostId, ...collabBusinessIds]
+      .filter((id): id is string => Boolean(id) && Types.ObjectId.isValid(id));
+
+    const hostRows = allHostIds.length
+      ? await HostModel.find({
+          _id: { $in: allHostIds },
+        }).lean()
+      : [];
+
+    const hostById = new Map<string, any>(
+      hostRows.map((row: any) => [String(row._id), row])
+    );
+
+    const organizers: PublicEventOrganizerEntry[] = [];
+    const primaryHost = event.hostId
+      ? hostById.get(String(event.hostId))
+      : null;
+    if (primaryHost) {
+      organizers.push({
+        _id: String(primaryHost._id),
+        name: primaryHost.name ?? "Event organizer",
+        logo: primaryHost.logo ?? undefined,
+        description: primaryHost.description ?? undefined,
+        city: primaryHost.address?.city ?? undefined,
+        isPrimary: true,
+      });
+    }
+    for (const collab of collaborators) {
+      const host = collab.businessLinkId
+        ? hostById.get(String(collab.businessLinkId))
+        : null;
+      organizers.push({
+        _id: host ? String(host._id) : undefined,
+        name: host?.name ?? collab.name,
+        logo: host?.logo ?? undefined,
+        description: host?.description ?? undefined,
+        city: host?.address?.city ?? undefined,
+        isPrimary: false,
+      });
+    }
+
+    return { artists, organizers };
   }
 }
 
