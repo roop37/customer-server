@@ -23,20 +23,50 @@ const REFRESH_COOKIE_MAX_AGE_SECONDS = 90 * 24 * 60 * 60;
 
 const cookieDomain = () => EnvVars.values.COOKIE_DOMAIN || undefined;
 
-const productionCookieOptions = () => ({
-  maxAge: REFRESH_COOKIE_MAX_AGE_SECONDS,
+type CustomerCookieOptions = {
+  maxAge: number;
+  httpOnly: true;
+  sameSite: "none" | "lax";
+  secure?: true;
+  domain?: string;
+  path: "/";
+};
+
+type CustomerCookieScopeOptions = Omit<CustomerCookieOptions, "maxAge">;
+
+const productionCookieScopeOptions = (
+  domain: string | undefined = cookieDomain()
+): CustomerCookieScopeOptions => ({
   httpOnly: true,
   sameSite: "none" as const,
   secure: true,
-  ...(cookieDomain() ? { domain: cookieDomain() as string } : {}),
+  ...(domain ? { domain } : {}),
   path: "/",
 });
 
-const developmentCookieOptions = () => ({
-  maxAge: REFRESH_COOKIE_MAX_AGE_SECONDS,
+const developmentCookieScopeOptions = (): CustomerCookieScopeOptions => ({
   httpOnly: true,
   sameSite: "lax" as const,
   path: "/",
+});
+
+const buildCustomerCookieScopeOptions = (
+  domain: string | undefined = cookieDomain(),
+  production: boolean = isProduction
+) => {
+  if (production || domain) {
+    return productionCookieScopeOptions(domain);
+  }
+
+  return developmentCookieScopeOptions();
+};
+
+export const buildCustomerCookieOptions = (
+  domain: string | undefined = cookieDomain(),
+  production: boolean = isProduction
+): CustomerCookieOptions => ({
+  maxAge: REFRESH_COOKIE_MAX_AGE_SECONDS,
+  ...buildCustomerCookieScopeOptions(domain, production),
 });
 
 export const setCustomerCookie = (
@@ -47,14 +77,14 @@ export const setCustomerCookie = (
   rep.setCookie(
     cookieKey,
     cookieValue,
-    isProduction ? productionCookieOptions() : developmentCookieOptions()
+    buildCustomerCookieOptions()
   );
 };
 
 export const clearCustomerCookie = (cookieKey: string, rep: FastifyReply) => {
   rep.clearCookie(
     cookieKey,
-    isProduction ? productionCookieOptions() : developmentCookieOptions()
+    buildCustomerCookieScopeOptions()
   );
 };
 
