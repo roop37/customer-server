@@ -27,6 +27,17 @@ jobs:
           node-version: 20
           cache: npm
 
+      - name: Configure GitHub Packages auth
+        env:
+          NPM_AUTH_TOKEN: ${{ secrets.NPM_AUTH_TOKEN }}
+        run: |
+          test -n "$NPM_AUTH_TOKEN"
+          {
+            echo "@hoizr-technology:registry=https://npm.pkg.github.com"
+            echo "//npm.pkg.github.com/:_authToken=${NPM_AUTH_TOKEN}"
+          } > ~/.npmrc
+          chmod 600 ~/.npmrc
+
       - name: Build
         run: |
           npm ci --legacy-peer-deps
@@ -40,6 +51,7 @@ jobs:
             --exclude=node_modules \
             --exclude=dist \
             --exclude=.env \
+            --exclude=.npmrc \
             --exclude=.remember \
             -czf "/tmp/${SERVICE}-${GITHUB_SHA}.tgz" .
 
@@ -48,10 +60,12 @@ jobs:
           DROPLET_HOST: ${{ secrets.DROPLET_HOST }}
           DROPLET_USER: ${{ secrets.DROPLET_USER }}
           DROPLET_SSH_KEY: ${{ secrets.DROPLET_SSH_KEY }}
+          NPM_AUTH_TOKEN: ${{ secrets.NPM_AUTH_TOKEN }}
         run: |
           test -n "$DROPLET_HOST"
           test -n "$DROPLET_USER"
           test -n "$DROPLET_SSH_KEY"
+          test -n "$NPM_AUTH_TOKEN"
 
           mkdir -p ~/.ssh
           printf '%s\n' "$DROPLET_SSH_KEY" > ~/.ssh/deploy_key
@@ -60,6 +74,12 @@ jobs:
 
           ssh -i ~/.ssh/deploy_key "$DROPLET_USER@$DROPLET_HOST" \
             "mkdir -p /home/hoizr/bin /home/hoizr/deploy-incoming /home/hoizr/releases /home/hoizr/env"
+
+          {
+            printf '%s\n' "@hoizr-technology:registry=https://npm.pkg.github.com"
+            printf '//npm.pkg.github.com/:_authToken=%s\n' "$NPM_AUTH_TOKEN"
+          } | ssh -i ~/.ssh/deploy_key "$DROPLET_USER@$DROPLET_HOST" \
+            "umask 077 && cat > ~/.npmrc"
 
           scp -i ~/.ssh/deploy_key scripts/deploy-release \
             "$DROPLET_USER@$DROPLET_HOST:/home/hoizr/bin/deploy-release"
