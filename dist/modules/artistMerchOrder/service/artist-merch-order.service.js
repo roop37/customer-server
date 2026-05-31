@@ -1,13 +1,8 @@
 "use strict";
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
 Object.defineProperty(exports, "__esModule", { value: true });
 const shared_1 = require("@hoizr-technology/shared");
 const typegoose_1 = require("@typegoose/typegoose");
-const crypto_1 = __importDefault(require("crypto"));
 const mercurius_1 = require("mercurius");
-const environment_1 = require("../../../utils/environment");
 const razorpay_client_1 = require("../../../utils/razorpay.client");
 const validations_1 = require("../../../utils/validations");
 const artist_merch_order_schema_1 = require("../schema/artist-merch-order.schema");
@@ -83,10 +78,10 @@ class ArtistMerchOrderService {
             shippingPincode: input.shippingPincode,
             status: shared_1.ArtistMerchOrderStatus.PAYMENT_PENDING,
         });
-        const razorpay = (0, razorpay_client_1.getRazorpay)();
-        const rzpOrder = await razorpay.orders.create({
-            amount: Math.round(totalAmount * 100),
-            currency: merch.currency,
+        const razorpay = (0, razorpay_client_1.getRazorpayPayments)();
+        const rzpOrder = await razorpay.createOrder({
+            amountPaise: Math.round(totalAmount * 100),
+            currency: "INR",
             receipt: order._id.toString(),
             notes: {
                 kind: "merch",
@@ -102,7 +97,7 @@ class ArtistMerchOrderService {
             order: order.toObject(),
             checkout: {
                 razorpayOrderId: rzpOrder.id,
-                razorpayKeyId: environment_1.EnvVars.values.RAZORPAY_KEY_ID,
+                razorpayKeyId: razorpay.keyId,
                 amount: totalAmount,
                 currency: merch.currency,
                 orderId: order._id.toString(),
@@ -118,11 +113,15 @@ class ArtistMerchOrderService {
         });
         if (!order)
             throw new mercurius_1.ErrorWithProps("Merch order not found");
-        const expectedSignature = crypto_1.default
-            .createHmac("sha256", environment_1.EnvVars.values.RAZORPAY_KEY_SECRET)
-            .update(`${input.razorpayOrderId}|${input.razorpayPaymentId}`)
-            .digest("hex");
-        if (expectedSignature !== input.razorpaySignature) {
+        // Timing-safe HMAC verify shared with the event-order path so a
+        // future Razorpay-side change lands in one place. `===` here used to
+        // leak prefix length via CPU cycle count.
+        const signatureOk = (0, razorpay_client_1.getRazorpayPayments)().verifyCheckoutSignature({
+            razorpayOrderId: input.razorpayOrderId,
+            razorpayPaymentId: input.razorpayPaymentId,
+            razorpaySignature: input.razorpaySignature,
+        });
+        if (!signatureOk) {
             throw new mercurius_1.ErrorWithProps("Invalid payment signature");
         }
         let finalOrder = null;

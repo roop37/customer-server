@@ -252,7 +252,7 @@ class OrderService {
             if (storedAmountPaise === amountPaise) {
                 return {
                     razorpayOrderId: order.razorpayOrderId,
-                    razorpayKeyId: environment_1.EnvVars.values.RAZORPAY_KEY_ID,
+                    razorpayKeyId: (0, razorpay_client_1.getRazorpayPayments)().keyId,
                     amount,
                     currency: "INR",
                     orderId,
@@ -261,9 +261,9 @@ class OrderService {
             await order_schema_1.OrderModel.updateOne({ _id: order._id }, { $unset: { razorpayOrderId: "" } });
             order.razorpayOrderId = undefined;
         }
-        const razorpay = (0, razorpay_client_1.getRazorpay)();
-        const rzpOrder = await razorpay.orders.create({
-            amount: amountPaise,
+        const razorpay = (0, razorpay_client_1.getRazorpayPayments)();
+        const rzpOrder = await razorpay.createOrder({
+            amountPaise,
             currency: "INR",
             receipt: orderId,
             notes: { orderId, eventId, customerId },
@@ -272,7 +272,7 @@ class OrderService {
         order.razorpayOrderId = rzpOrder.id;
         return {
             razorpayOrderId: rzpOrder.id,
-            razorpayKeyId: environment_1.EnvVars.values.RAZORPAY_KEY_ID,
+            razorpayKeyId: razorpay.keyId,
             amount,
             currency: "INR",
             orderId,
@@ -524,6 +524,20 @@ class OrderService {
                 totalPrice: +(unitPrice * line.quantity).toFixed(2),
             };
         });
+        // Venue-wide capacity guard. Per-ticket caps can sum higher than the
+        // venue allows (e.g. 100 GA + 50 VIP at a 120-cap venue). Defends
+        // against the rare case where maxCapacity was lowered between cart
+        // reservation and order placement — cart.assertLatestInventoryStillFits
+        // already enforces this at reservation time.
+        const eventMaxCapacity = Number(event.maxCapacity ?? 0);
+        if (eventMaxCapacity > 0) {
+            const allTickets = (event.tickets ?? []);
+            const totalSold = allTickets.reduce((sum, t) => sum + Number(t.ticketSold ?? 0), 0);
+            const totalDesired = orderTickets.reduce((sum, t) => sum + t.quantity, 0);
+            if (totalSold + totalDesired > eventMaxCapacity) {
+                throw new mercurius_1.ErrorWithProps(`This event has reached its venue capacity of ${eventMaxCapacity}.`);
+            }
+        }
         const ticketRefs = new Map((event.tickets ?? []).map((t) => [
             String(t._id),
             { ticketGST: t.ticketGST, gstRate: t.gstRate },
@@ -728,23 +742,32 @@ class OrderService {
         }).lean();
         if (!order)
             throw new mercurius_1.ErrorWithProps("Order not found");
-        const expectedSignature = crypto_1.default
-            .createHmac("sha256", environment_1.EnvVars.values.RAZORPAY_KEY_SECRET)
-            .update(`${razorpayOrderId}|${razorpayPaymentId}`)
-            .digest("hex");
-        // Timing-safe compare. `!==` leaks the prefix-match length via
-        // CPU cycle count; with HMAC signatures that's exploitable.
-        let signatureOk = false;
-        try {
-            const a = Buffer.from(expectedSignature, "utf8");
-            const b = Buffer.from(razorpaySignature ?? "", "utf8");
-            signatureOk = a.length === b.length && crypto_1.default.timingSafeEqual(a, b);
-        }
-        catch {
-            signatureOk = false;
-        }
+        const razorpay = (0, razorpay_client_1.getRazorpayPayments)();
+        const signatureOk = razorpay.verifyCheckoutSignature({
+            razorpayOrderId,
+            razorpayPaymentId,
+            razorpaySignature: razorpaySignature ?? "",
+        });
         if (!signatureOk) {
             throw new mercurius_1.ErrorWithProps("Invalid payment signature");
+        }
+        let payment;
+        try {
+            payment = await razorpay.fetchPayment(razorpayPaymentId);
+        }
+        catch {
+            throw new mercurius_1.ErrorWithProps("Unable to verify payment with Razorpay");
+        }
+        if (payment?.order_id !== razorpayOrderId) {
+            throw new mercurius_1.ErrorWithProps("Payment does not match this order");
+        }
+        const expectedAmountPaise = Math.round(Number(order.totalAmount ?? 0) * 100);
+        if (Number(payment?.amount ?? 0) !== expectedAmountPaise) {
+            throw new mercurius_1.ErrorWithProps("Payment amount does not match this order");
+        }
+        const paymentStatus = String(payment?.status ?? "").toLowerCase();
+        if (!["authorized", "captured"].includes(paymentStatus)) {
+            throw new mercurius_1.ErrorWithProps("Payment is not authorised by Razorpay");
         }
         if (order.orderStatus === shared_1.OrderStatus.PAYMENT_PENDING) {
             // The webhook handler is the source of truth for status flip + QR

@@ -14,7 +14,7 @@ const type_graphql_1 = require("type-graphql");
 const master_schema_1 = require("../schema/master.schema");
 let MastersResolver = class MastersResolver {
     async getActiveIndianCities() {
-        return master_schema_1.IndianCityModel.find({ status: true })
+        return master_schema_1.CityModel.find({ status: true })
             .sort({ rank: 1, value: 1 })
             .lean();
     }
@@ -31,7 +31,7 @@ let MastersResolver = class MastersResolver {
 };
 exports.MastersResolver = MastersResolver;
 __decorate([
-    (0, type_graphql_1.Query)(() => [master_schema_1.IndianCity]),
+    (0, type_graphql_1.Query)(() => [master_schema_1.City]),
     __metadata("design:type", Function),
     __metadata("design:paramtypes", []),
     __metadata("design:returntype", Promise)

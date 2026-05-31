@@ -14,7 +14,7 @@ import crypto from "crypto";
 import { ErrorWithProps } from "mercurius";
 import { EnvVars } from "../../../utils/environment";
 import { enqueueLifecycleEmail } from "../../../utils/lifecycle.queue";
-import { getRazorpay } from "../../../utils/razorpay.client";
+import { getRazorpayPayments } from "../../../utils/razorpay.client";
 import { RedisKeys, redisClient } from "../../../utils/redis";
 import { isAlphanumeric } from "../../../utils/validations";
 import CartService, {
@@ -362,7 +362,7 @@ class OrderService {
       if (storedAmountPaise === amountPaise) {
         return {
           razorpayOrderId: order.razorpayOrderId,
-          razorpayKeyId: EnvVars.values.RAZORPAY_KEY_ID,
+          razorpayKeyId: getRazorpayPayments().keyId,
           amount,
           currency: "INR",
           orderId,
@@ -375,9 +375,9 @@ class OrderService {
       order.razorpayOrderId = undefined;
     }
 
-    const razorpay = getRazorpay();
-    const rzpOrder = await razorpay.orders.create({
-      amount: amountPaise,
+    const razorpay = getRazorpayPayments();
+    const rzpOrder = await razorpay.createOrder({
+      amountPaise,
       currency: "INR",
       receipt: orderId,
       notes: { orderId, eventId, customerId },
@@ -390,7 +390,7 @@ class OrderService {
 
     return {
       razorpayOrderId: rzpOrder.id,
-      razorpayKeyId: EnvVars.values.RAZORPAY_KEY_ID,
+      razorpayKeyId: razorpay.keyId,
       amount,
       currency: "INR",
       orderId,
@@ -732,6 +732,29 @@ class OrderService {
       };
     });
 
+    // Venue-wide capacity guard. Per-ticket caps can sum higher than the
+    // venue allows (e.g. 100 GA + 50 VIP at a 120-cap venue). Defends
+    // against the rare case where maxCapacity was lowered between cart
+    // reservation and order placement — cart.assertLatestInventoryStillFits
+    // already enforces this at reservation time.
+    const eventMaxCapacity = Number((event as any).maxCapacity ?? 0);
+    if (eventMaxCapacity > 0) {
+      const allTickets = (event.tickets ?? []) as any[];
+      const totalSold = allTickets.reduce(
+        (sum, t) => sum + Number(t.ticketSold ?? 0),
+        0
+      );
+      const totalDesired = orderTickets.reduce(
+        (sum, t) => sum + t.quantity,
+        0
+      );
+      if (totalSold + totalDesired > eventMaxCapacity) {
+        throw new ErrorWithProps(
+          `This event has reached its venue capacity of ${eventMaxCapacity}.`
+        );
+      }
+    }
+
     const ticketRefs = new Map<string, CartTicketRef>(
       (event.tickets ?? []).map((t: any) => [
         String(t._id),
@@ -1039,23 +1062,33 @@ class OrderService {
     }).lean<Order & { _id: any }>();
     if (!order) throw new ErrorWithProps("Order not found");
 
-    const expectedSignature = crypto
-      .createHmac("sha256", EnvVars.values.RAZORPAY_KEY_SECRET)
-      .update(`${razorpayOrderId}|${razorpayPaymentId}`)
-      .digest("hex");
-
-    // Timing-safe compare. `!==` leaks the prefix-match length via
-    // CPU cycle count; with HMAC signatures that's exploitable.
-    let signatureOk = false;
-    try {
-      const a = Buffer.from(expectedSignature, "utf8");
-      const b = Buffer.from(razorpaySignature ?? "", "utf8");
-      signatureOk = a.length === b.length && crypto.timingSafeEqual(a, b);
-    } catch {
-      signatureOk = false;
-    }
+    const razorpay = getRazorpayPayments();
+    const signatureOk = razorpay.verifyCheckoutSignature({
+      razorpayOrderId,
+      razorpayPaymentId,
+      razorpaySignature: razorpaySignature ?? "",
+    });
     if (!signatureOk) {
       throw new ErrorWithProps("Invalid payment signature");
+    }
+
+    let payment: Awaited<ReturnType<typeof razorpay.fetchPayment>>;
+    try {
+      payment = await razorpay.fetchPayment(razorpayPaymentId);
+    } catch {
+      throw new ErrorWithProps("Unable to verify payment with Razorpay");
+    }
+
+    if (payment?.order_id !== razorpayOrderId) {
+      throw new ErrorWithProps("Payment does not match this order");
+    }
+    const expectedAmountPaise = Math.round(Number(order.totalAmount ?? 0) * 100);
+    if (Number(payment?.amount ?? 0) !== expectedAmountPaise) {
+      throw new ErrorWithProps("Payment amount does not match this order");
+    }
+    const paymentStatus = String(payment?.status ?? "").toLowerCase();
+    if (!["authorized", "captured"].includes(paymentStatus)) {
+      throw new ErrorWithProps("Payment is not authorised by Razorpay");
     }
 
     if (order.orderStatus === OrderStatus.PAYMENT_PENDING) {

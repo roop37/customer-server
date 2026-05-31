@@ -1,20 +1,20 @@
 import { Query, Resolver } from "type-graphql";
 import {
+  City,
+  CityModel,
   EventCategory,
   EventCategoryModel,
   GenreTag,
   GenreTagModel,
-  IndianCity,
-  IndianCityModel,
 } from "../schema/master.schema";
 
 @Resolver()
 export class MastersResolver {
-  @Query(() => [IndianCity])
-  async getActiveIndianCities(): Promise<IndianCity[]> {
-    return IndianCityModel.find({ status: true })
+  @Query(() => [City])
+  async getActiveIndianCities(): Promise<City[]> {
+    return CityModel.find({ status: true })
       .sort({ rank: 1, value: 1 })
-      .lean<IndianCity[]>();
+      .lean<City[]>();
   }
 
   @Query(() => [EventCategory])

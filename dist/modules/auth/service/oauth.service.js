@@ -63,6 +63,7 @@ class OAuthService {
                 customerId: existingByGoogle._id.toString(),
                 accessToken: tokens.accessToken,
                 refreshToken: tokens.refreshToken,
+                uniqueId: tokens.uniqueId,
             };
         }
         // 2) Existing account by email match (primary or secondary). Link
@@ -85,6 +86,7 @@ class OAuthService {
                 customerId: existingByEmail._id.toString(),
                 accessToken: tokens.accessToken,
                 refreshToken: tokens.refreshToken,
+                uniqueId: tokens.uniqueId,
             };
         }
         // 3) Brand-new — open a pending signup. Client collects + verifies
@@ -131,7 +133,7 @@ class OAuthService {
             throw new mercurius_1.ErrorWithProps("Too many OTP requests for this number. Try again later.");
         }
         await (0, rateLimit_1.incrementRateLimit)(rlKey);
-        const existing = await customer_schema_1.CustomerModel.findOne({ phone })
+        const existing = await customer_schema_1.CustomerModel.findOne({ phone, isDeleted: false })
             .select("_id")
             .lean();
         const otpId = await this.otp.generateOtp(phone, Boolean(existing));
@@ -211,6 +213,7 @@ class OAuthService {
                 customerId: customer._id.toString(),
                 accessToken: tokens.accessToken,
                 refreshToken: tokens.refreshToken,
+                uniqueId: tokens.uniqueId,
             };
         }
         // Phone matches an existing account → collision matrix kicks in.
@@ -248,6 +251,7 @@ class OAuthService {
                 customerId: existing._id.toString(),
                 accessToken: tokens.accessToken,
                 refreshToken: tokens.refreshToken,
+                uniqueId: tokens.uniqueId,
                 primaryEmailMasked: maskEmail(existing.email),
                 secondaryEmail: existing.secondaryEmail ?? emailToUse,
             };
@@ -276,6 +280,7 @@ class OAuthService {
             customerId: existing._id.toString(),
             accessToken: tokens.accessToken,
             refreshToken: tokens.refreshToken,
+            uniqueId: tokens.uniqueId,
             primaryEmailMasked: maskEmail(existing.email),
             secondaryEmail: emailToUse,
         };

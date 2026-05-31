@@ -29,8 +29,7 @@ let AuthResolver = class AuthResolver {
         this.oauth = new oauth_service_1.default();
     }
     async customerRequestOtp(input) {
-        const otpId = await this.service.requestOtp(input);
-        return { otpId };
+        return this.service.requestOtp(input);
     }
     async customerVerifyOtp(input, ctx) {
         const result = await this.service.verifyOtp(input);
@@ -59,6 +58,9 @@ let AuthResolver = class AuthResolver {
             result.refreshToken) {
             (0, cookie_1.setCustomerCookie)(cookie_1.CustomerCookieKeys.ACCESS_TOKEN, result.accessToken, ctx.rep);
             (0, cookie_1.setCustomerCookie)(cookie_1.CustomerCookieKeys.REFRESH_TOKEN, result.refreshToken, ctx.rep);
+            if (result.uniqueId) {
+                (0, cookie_1.setCustomerCookie)(cookie_1.CustomerCookieKeys.UNIQUE_ID, result.uniqueId, ctx.rep);
+            }
         }
         return result;
     }
@@ -77,6 +79,7 @@ let AuthResolver = class AuthResolver {
         const result = await this.oauth.pendingSignupVerifyOtp(input);
         (0, cookie_1.setCustomerCookie)(cookie_1.CustomerCookieKeys.ACCESS_TOKEN, result.accessToken, ctx.rep);
         (0, cookie_1.setCustomerCookie)(cookie_1.CustomerCookieKeys.REFRESH_TOKEN, result.refreshToken, ctx.rep);
+        (0, cookie_1.setCustomerCookie)(cookie_1.CustomerCookieKeys.UNIQUE_ID, result.uniqueId, ctx.rep);
         return result;
     }
     async customerTokenRefresh(ctx) {

@@ -23,15 +23,16 @@ import {
 class AuthService {
   private otp = new OtpService();
 
-  async requestOtp(input: CustomerOtpRequestInput): Promise<string> {
+  async requestOtp(
+    input: CustomerOtpRequestInput
+  ): Promise<{ otpId: string; profileRequired: boolean }> {
     const phone = input.phone.trim();
     if (!isValidPhone(phone)) {
       throw new ErrorWithProps("Invalid phone number");
     }
 
     // Rate limit OTP requests per phone — prevents abuse of the
-    // DoubleTick/SMS budget and blocks brute-force enumeration of
-    // existing customers via the requestOtp response.
+    // DoubleTick/SMS budget and slows repeated account-status probes.
     const rlKey = `customer_otp_request:${phone}`;
     if (!(await checkRateLimit(rlKey))) {
       throw new ErrorWithProps(
@@ -40,8 +41,11 @@ class AuthService {
     }
     await incrementRateLimit(rlKey);
 
-    const existing = await CustomerModel.findOne({ phone }).select("_id").lean();
-    return this.otp.generateOtp(phone, Boolean(existing));
+    const existing = await CustomerModel.findOne({ phone, isDeleted: false })
+      .select("_id")
+      .lean();
+    const otpId = await this.otp.generateOtp(phone, Boolean(existing));
+    return { otpId, profileRequired: !existing };
   }
 
   async verifyOtp(input: CustomerOtpVerifyInput): Promise<{
