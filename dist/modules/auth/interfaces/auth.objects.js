@@ -18,6 +18,10 @@ __decorate([
     (0, type_graphql_1.Field)(() => String),
     __metadata("design:type", String)
 ], CustomerOtpResponse.prototype, "otpId", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => Boolean),
+    __metadata("design:type", Boolean)
+], CustomerOtpResponse.prototype, "profileRequired", void 0);
 exports.CustomerOtpResponse = CustomerOtpResponse = __decorate([
     (0, type_graphql_1.ObjectType)()
 ], CustomerOtpResponse);
@@ -119,6 +123,10 @@ __decorate([
 __decorate([
     (0, type_graphql_1.Field)(() => String, { nullable: true }),
     __metadata("design:type", String)
+], CustomerGoogleStartResponse.prototype, "uniqueId", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => String, { nullable: true }),
+    __metadata("design:type", String)
 ], CustomerGoogleStartResponse.prototype, "pendingToken", void 0);
 __decorate([
     (0, type_graphql_1.Field)(() => GoogleStartPrefill, { nullable: true }),
@@ -169,6 +177,10 @@ __decorate([
     (0, type_graphql_1.Field)(() => String),
     __metadata("design:type", String)
 ], CustomerPendingSignupVerifyOtpResponse.prototype, "refreshToken", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => String),
+    __metadata("design:type", String)
+], CustomerPendingSignupVerifyOtpResponse.prototype, "uniqueId", void 0);
 __decorate([
     (0, type_graphql_1.Field)(() => String, { nullable: true }),
     __metadata("design:type", String)

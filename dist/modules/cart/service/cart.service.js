@@ -59,7 +59,7 @@ class CartService {
         if (!ticketIds.length && !extraIds.length)
             return;
         const latest = await event_schema_1.EventModel.findById(eventId)
-            .select("tickets extras")
+            .select("tickets extras maxCapacity")
             .lean();
         if (!latest) {
             throw new mercurius_1.ErrorWithProps("Event not available for booking");
@@ -88,6 +88,23 @@ class CartService {
             const reserved = Math.max(currentLocks[(0, redis_1.extraLockKey)(eventId, extraId)] ?? 0, pendingExtras.get(extraId) ?? 0);
             if (Number(extra.sold ?? 0) + reserved > Number(extra.quantity ?? 0)) {
                 throw new mercurius_1.ErrorWithProps(`${extra.name ?? "Add-on"} is no longer available in this quantity`);
+            }
+        }
+        // Venue-wide capacity guard. Per-ticket caps can sum higher than the
+        // venue allows (e.g. 100 GA + 50 VIP at a 120-cap venue). After the
+        // per-ticket reservation above succeeds, verify the event-wide demand
+        // (sold + active locks across every ticket variant) does not exceed
+        // event.maxCapacity. Uses post-reservation locks so this customer's
+        // contribution is already included.
+        const maxCapacity = Number(latest.maxCapacity ?? 0);
+        if (maxCapacity > 0) {
+            const allTickets = (latest.tickets ?? []);
+            const allKeys = allTickets.map((t) => (0, redis_1.ticketLockKey)(eventId, String(t._id)));
+            const eventLocks = await this.loadActiveLockedQuantities(allKeys);
+            const totalSold = allTickets.reduce((sum, t) => sum + Number(t.ticketSold ?? 0), 0);
+            const totalLocked = allTickets.reduce((sum, t) => sum + (eventLocks[(0, redis_1.ticketLockKey)(eventId, String(t._id))] ?? 0), 0);
+            if (totalSold + totalLocked > maxCapacity) {
+                throw new mercurius_1.ErrorWithProps(`This event has reached its venue capacity of ${maxCapacity}.`);
             }
         }
     }

@@ -89,6 +89,7 @@ class OAuthService {
         customerId: existingByGoogle._id.toString(),
         accessToken: tokens.accessToken,
         refreshToken: tokens.refreshToken,
+        uniqueId: tokens.uniqueId,
       };
     }
 
@@ -118,6 +119,7 @@ class OAuthService {
         customerId: existingByEmail._id.toString(),
         accessToken: tokens.accessToken,
         refreshToken: tokens.refreshToken,
+        uniqueId: tokens.uniqueId,
       };
     }
 
@@ -180,7 +182,7 @@ class OAuthService {
     }
     await incrementRateLimit(rlKey);
 
-    const existing = await CustomerModel.findOne({ phone })
+    const existing = await CustomerModel.findOne({ phone, isDeleted: false })
       .select("_id")
       .lean();
     const otpId = await this.otp.generateOtp(phone, Boolean(existing));
@@ -297,6 +299,7 @@ class OAuthService {
         customerId: customer._id.toString(),
         accessToken: tokens.accessToken,
         refreshToken: tokens.refreshToken,
+        uniqueId: tokens.uniqueId,
       };
     }
 
@@ -348,6 +351,7 @@ class OAuthService {
         customerId: existing._id.toString(),
         accessToken: tokens.accessToken,
         refreshToken: tokens.refreshToken,
+        uniqueId: tokens.uniqueId,
         primaryEmailMasked: maskEmail(existing.email),
         secondaryEmail: existing.secondaryEmail ?? emailToUse,
       };
@@ -388,6 +392,7 @@ class OAuthService {
       customerId: existing._id.toString(),
       accessToken: tokens.accessToken,
       refreshToken: tokens.refreshToken,
+      uniqueId: tokens.uniqueId,
       primaryEmailMasked: maskEmail(existing.email),
       secondaryEmail: emailToUse,
     };

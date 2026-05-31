@@ -128,7 +128,7 @@ class CartService {
     if (!ticketIds.length && !extraIds.length) return;
 
     const latest = await EventModel.findById(eventId)
-      .select("tickets extras")
+      .select("tickets extras maxCapacity")
       .lean();
     if (!latest) {
       throw new ErrorWithProps("Event not available for booking");
@@ -176,6 +176,33 @@ class CartService {
       if (Number(extra.sold ?? 0) + reserved > Number(extra.quantity ?? 0)) {
         throw new ErrorWithProps(
           `${extra.name ?? "Add-on"} is no longer available in this quantity`
+        );
+      }
+    }
+
+    // Venue-wide capacity guard. Per-ticket caps can sum higher than the
+    // venue allows (e.g. 100 GA + 50 VIP at a 120-cap venue). After the
+    // per-ticket reservation above succeeds, verify the event-wide demand
+    // (sold + active locks across every ticket variant) does not exceed
+    // event.maxCapacity. Uses post-reservation locks so this customer's
+    // contribution is already included.
+    const maxCapacity = Number((latest as any).maxCapacity ?? 0);
+    if (maxCapacity > 0) {
+      const allTickets = (latest.tickets ?? []) as any[];
+      const allKeys = allTickets.map((t) => ticketLockKey(eventId, String(t._id)));
+      const eventLocks = await this.loadActiveLockedQuantities(allKeys);
+      const totalSold = allTickets.reduce(
+        (sum, t) => sum + Number(t.ticketSold ?? 0),
+        0
+      );
+      const totalLocked = allTickets.reduce(
+        (sum, t) =>
+          sum + (eventLocks[ticketLockKey(eventId, String(t._id))] ?? 0),
+        0
+      );
+      if (totalSold + totalLocked > maxCapacity) {
+        throw new ErrorWithProps(
+          `This event has reached its venue capacity of ${maxCapacity}.`
         );
       }
     }

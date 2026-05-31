@@ -23,15 +23,17 @@ class AuthService {
             throw new mercurius_1.ErrorWithProps("Invalid phone number");
         }
         // Rate limit OTP requests per phone — prevents abuse of the
-        // DoubleTick/SMS budget and blocks brute-force enumeration of
-        // existing customers via the requestOtp response.
+        // DoubleTick/SMS budget and slows repeated account-status probes.
         const rlKey = `customer_otp_request:${phone}`;
         if (!(await (0, rateLimit_1.checkRateLimit)(rlKey))) {
             throw new mercurius_1.ErrorWithProps("Too many OTP requests for this number. Try again later.");
         }
         await (0, rateLimit_1.incrementRateLimit)(rlKey);
-        const existing = await customer_schema_1.CustomerModel.findOne({ phone }).select("_id").lean();
-        return this.otp.generateOtp(phone, Boolean(existing));
+        const existing = await customer_schema_1.CustomerModel.findOne({ phone, isDeleted: false })
+            .select("_id")
+            .lean();
+        const otpId = await this.otp.generateOtp(phone, Boolean(existing));
+        return { otpId, profileRequired: !existing };
     }
     async verifyOtp(input) {
         const phone = input.phone.trim();

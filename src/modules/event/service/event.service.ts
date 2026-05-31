@@ -22,15 +22,33 @@ class PublicEventService {
   async getEventBySlug(slug: string): Promise<Event | null> {
     if (!slug) throw new ErrorWithProps("Slug is required");
 
-    const event = await EventModel.findOne({
-      slug,
+    const visibilityFilter = {
       isDeleted: false,
       isVisible: true,
       status: EventStatus.PUBLISHED,
       adminPaused: { $ne: true },
-    }).lean<Event>();
+    } as const;
 
-    return event ?? null;
+    const event = await EventModel.findOne({
+      slug,
+      ...visibilityFilter,
+    }).lean<Event>();
+    if (event) return event;
+
+    // ID fallback. Older campaigns + hand-pasted host ctaLinks sometimes
+    // produce /events/<ObjectId> URLs even though the canonical SEO URL
+    // is /events/<slug>. Recognise a 24-char hex ObjectId and fall back
+    // to findById with the same visibility gates so the email link is
+    // never a 404 just because the surrounding code used the wrong id.
+    if (Types.ObjectId.isValid(slug) && /^[a-f0-9]{24}$/i.test(slug)) {
+      const byId = await EventModel.findOne({
+        _id: slug,
+        ...visibilityFilter,
+      }).lean<Event>();
+      if (byId) return byId;
+    }
+
+    return null;
   }
 
   async getEventById(id: string): Promise<Event | null> {
@@ -59,11 +77,12 @@ class PublicEventService {
       isDeleted: false,
       isVisible: true,
       adminPaused: { $ne: true },
-      $or: [
-        { startDate: { $gte: now } },
-        { endDate: { $gte: now } },
-        { isComingSoon: true },
-      ],
+      // Only show events whose startDate is still in the future. Once
+      // an event has started (or finished), it disappears from the
+      // listing — customers can't book a show that's already begun.
+      // isComingSoon no longer overrides the date gate; a stale flag
+      // can't surface an already-started event.
+      startDate: { $gte: now },
     };
 
     if (input.cityId) query.cityId = input.cityId;
@@ -77,7 +96,6 @@ class PublicEventService {
     }
 
     if (input.startDateFrom || input.startDateTo) {
-      delete query.$or;
       query.startDate = {};
       if (input.startDateFrom && input.startDateFrom > now) {
         query.startDate.$gte = input.startDateFrom;
@@ -258,7 +276,7 @@ class PublicEventService {
       organizers.push({
         _id: String(primaryHost._id),
         name: primaryHost.name ?? "Event organizer",
-        logo: primaryHost.logo ?? undefined,
+        logo: primaryHost.logo ?? primaryHost.brandingLogo ?? undefined,
         description: primaryHost.description ?? undefined,
         city: primaryHost.address?.city ?? undefined,
         isPrimary: true,
@@ -271,7 +289,7 @@ class PublicEventService {
       organizers.push({
         _id: host ? String(host._id) : undefined,
         name: host?.name ?? collab.name,
-        logo: host?.logo ?? undefined,
+        logo: host?.logo ?? host?.brandingLogo ?? (collab as any).logo ?? undefined,
         description: host?.description ?? undefined,
         city: host?.address?.city ?? undefined,
         isPrimary: false,
