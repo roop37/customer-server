@@ -1,4 +1,4 @@
-name: Deploy dev
+name: Deploy to dev droplet
 
 on:
   push:
@@ -6,89 +6,19 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: dev-customer-server
+  group: deploy-customer-server
   cancel-in-progress: false
 
-env:
-  SERVICE: customer-server
-
 jobs:
-  build-and-deploy:
+  deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
-
+    timeout-minutes: 10
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: SSH + run deploy.sh on droplet
+        uses: appleboy/ssh-action@v1.2.0
         with:
-          node-version: 20
-          cache: npm
-
-      - name: Configure GitHub Packages auth
-        env:
-          NPM_AUTH_TOKEN: ${{ secrets.NPM_AUTH_TOKEN }}
-        run: |
-          test -n "$NPM_AUTH_TOKEN"
-          {
-            echo "@hoizr-technology:registry=https://npm.pkg.github.com"
-            echo "//npm.pkg.github.com/:_authToken=${NPM_AUTH_TOKEN}"
-          } > ~/.npmrc
-          chmod 600 ~/.npmrc
-
-      - name: Build
-        run: |
-          npm ci --legacy-peer-deps
-          npm run build
-          npm run test:unit --if-present
-
-      - name: Package source
-        run: |
-          tar \
-            --exclude=.git \
-            --exclude=node_modules \
-            --exclude=dist \
-            --exclude=.env \
-            --exclude=.npmrc \
-            --exclude=.remember \
-            -czf "/tmp/${SERVICE}-${GITHUB_SHA}.tgz" .
-
-      - name: Upload and deploy
-        env:
-          DROPLET_HOST: ${{ secrets.DROPLET_HOST }}
-          DROPLET_USER: ${{ secrets.DROPLET_USER }}
-          DROPLET_SSH_KEY: ${{ secrets.DROPLET_SSH_KEY }}
-          NPM_AUTH_TOKEN: ${{ secrets.NPM_AUTH_TOKEN }}
-        run: |
-          test -n "$DROPLET_HOST"
-          test -n "$DROPLET_USER"
-          test -n "$DROPLET_SSH_KEY"
-          test -n "$NPM_AUTH_TOKEN"
-
-          mkdir -p ~/.ssh
-          printf '%s\n' "$DROPLET_SSH_KEY" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-          ssh-keyscan -H "$DROPLET_HOST" >> ~/.ssh/known_hosts
-
-          ssh -i ~/.ssh/deploy_key "$DROPLET_USER@$DROPLET_HOST" \
-            "mkdir -p /home/hoizr/bin /home/hoizr/deploy-incoming /home/hoizr/releases /home/hoizr/env"
-
-          {
-            printf '%s\n' "@hoizr-technology:registry=https://npm.pkg.github.com"
-            printf '//npm.pkg.github.com/:_authToken=%s\n' "$NPM_AUTH_TOKEN"
-          } | ssh -i ~/.ssh/deploy_key "$DROPLET_USER@$DROPLET_HOST" \
-            "umask 077 && cat > ~/.npmrc"
-
-          scp -i ~/.ssh/deploy_key scripts/deploy-release \
-            "$DROPLET_USER@$DROPLET_HOST:/home/hoizr/bin/deploy-release"
-
-          ssh -i ~/.ssh/deploy_key "$DROPLET_USER@$DROPLET_HOST" \
-            "chmod +x /home/hoizr/bin/deploy-release"
-
-          scp -i ~/.ssh/deploy_key "/tmp/${SERVICE}-${GITHUB_SHA}.tgz" \
-            "$DROPLET_USER@$DROPLET_HOST:/home/hoizr/deploy-incoming/${SERVICE}-${GITHUB_SHA}.tgz"
-
-          ssh -i ~/.ssh/deploy_key "$DROPLET_USER@$DROPLET_HOST" \
-            "/home/hoizr/bin/deploy-release ${SERVICE} ${GITHUB_SHA} /home/hoizr/deploy-incoming/${SERVICE}-${GITHUB_SHA}.tgz"
+          host: ${{ secrets.DROPLET_HOST }}
+          username: ${{ secrets.DROPLET_USER }}
+          key: ${{ secrets.DROPLET_SSH_KEY }}
+          command_timeout: 9m
+          script: /home/hoizr/hoizr-stack/deploy.sh customer-server
