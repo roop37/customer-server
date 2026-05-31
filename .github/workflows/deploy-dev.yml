@@ -1,0 +1,74 @@
+name: Deploy dev
+
+on:
+  push:
+    branches: [dev]
+  workflow_dispatch:
+
+concurrency:
+  group: dev-customer-server
+  cancel-in-progress: false
+
+env:
+  SERVICE: customer-server
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Build
+        run: |
+          npm ci --legacy-peer-deps
+          npm run build
+          npm run test:unit --if-present
+
+      - name: Package source
+        run: |
+          tar \
+            --exclude=.git \
+            --exclude=node_modules \
+            --exclude=dist \
+            --exclude=.env \
+            --exclude=.remember \
+            -czf "/tmp/${SERVICE}-${GITHUB_SHA}.tgz" .
+
+      - name: Upload and deploy
+        env:
+          DROPLET_HOST: ${{ secrets.DROPLET_HOST }}
+          DROPLET_USER: ${{ secrets.DROPLET_USER }}
+          DROPLET_SSH_KEY: ${{ secrets.DROPLET_SSH_KEY }}
+        run: |
+          test -n "$DROPLET_HOST"
+          test -n "$DROPLET_USER"
+          test -n "$DROPLET_SSH_KEY"
+
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DROPLET_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "$DROPLET_HOST" >> ~/.ssh/known_hosts
+
+          ssh -i ~/.ssh/deploy_key "$DROPLET_USER@$DROPLET_HOST" \
+            "mkdir -p /home/hoizr/bin /home/hoizr/deploy-incoming /home/hoizr/releases /home/hoizr/env"
+
+          scp -i ~/.ssh/deploy_key scripts/deploy-release \
+            "$DROPLET_USER@$DROPLET_HOST:/home/hoizr/bin/deploy-release"
+
+          ssh -i ~/.ssh/deploy_key "$DROPLET_USER@$DROPLET_HOST" \
+            "chmod +x /home/hoizr/bin/deploy-release"
+
+          scp -i ~/.ssh/deploy_key "/tmp/${SERVICE}-${GITHUB_SHA}.tgz" \
+            "$DROPLET_USER@$DROPLET_HOST:/home/hoizr/deploy-incoming/${SERVICE}-${GITHUB_SHA}.tgz"
+
+          ssh -i ~/.ssh/deploy_key "$DROPLET_USER@$DROPLET_HOST" \
+            "/home/hoizr/bin/deploy-release ${SERVICE} ${GITHUB_SHA} /home/hoizr/deploy-incoming/${SERVICE}-${GITHUB_SHA}.tgz"
