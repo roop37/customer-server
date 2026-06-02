@@ -19,7 +19,6 @@ const zodEnvSchema = z.object({
   COOKIE_SECRET: z.string().min(1, "COOKIE_SECRET is not present"),
 
   APP_URL: z.string().min(1, "APP_URL is not present").url("APP_URL is not a valid URL"),
-  SERVER_URL: z.string().min(1, "SERVER_URL is not present").url("SERVER_URL is not a valid URL"),
   PORT: z.string().optional().default("4001"),
   CUSTOMER_CORS_ORIGINS: z.string().optional().default(""),
 

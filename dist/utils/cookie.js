@@ -45,12 +45,27 @@ const buildCustomerCookieOptions = (domain = cookieDomain(), production = helper
     ...buildCustomerCookieScopeOptions(domain, production),
 });
 exports.buildCustomerCookieOptions = buildCustomerCookieOptions;
+// Options that match a host-only cookie (no Domain attribute). Used to
+// evict cookies left over from pre-COOKIE_DOMAIN deploys, which got scoped
+// to the bare host (dev-customer.hoizr.com etc.) and now sit alongside the
+// new .hoizr.com-scoped cookies, confusing the Cookie header parser.
+const buildHostOnlyScopeOptions = () => helper_1.isProduction
+    ? { httpOnly: true, sameSite: "none", secure: true, path: "/" }
+    : { httpOnly: true, sameSite: "lax", path: "/" };
 const setCustomerCookie = (cookieKey, cookieValue, rep) => {
-    rep.setCookie(cookieKey, cookieValue, (0, exports.buildCustomerCookieOptions)());
+    const domain = cookieDomain();
+    if (domain) {
+        rep.clearCookie(cookieKey, buildHostOnlyScopeOptions());
+    }
+    rep.setCookie(cookieKey, cookieValue, (0, exports.buildCustomerCookieOptions)(domain));
 };
 exports.setCustomerCookie = setCustomerCookie;
 const clearCustomerCookie = (cookieKey, rep) => {
-    rep.clearCookie(cookieKey, buildCustomerCookieScopeOptions());
+    const domain = cookieDomain();
+    rep.clearCookie(cookieKey, buildCustomerCookieScopeOptions(domain));
+    if (domain) {
+        rep.clearCookie(cookieKey, buildHostOnlyScopeOptions());
+    }
 };
 exports.clearCustomerCookie = clearCustomerCookie;
 const readTokenFromRequest = (req, cookieKey) => {
