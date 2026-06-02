@@ -19,7 +19,6 @@ const zodEnvSchema = zod_1.z.object({
     CLIENT_ENCRYPTION_KEY: zod_1.z.string().min(1, "CLIENT_ENCRYPTION_KEY is not present"),
     COOKIE_SECRET: zod_1.z.string().min(1, "COOKIE_SECRET is not present"),
     APP_URL: zod_1.z.string().min(1, "APP_URL is not present").url("APP_URL is not a valid URL"),
-    SERVER_URL: zod_1.z.string().min(1, "SERVER_URL is not present").url("SERVER_URL is not a valid URL"),
     PORT: zod_1.z.string().optional().default("4001"),
     CUSTOMER_CORS_ORIGINS: zod_1.z.string().optional().default(""),
     // Cookie domain. When set, cookies are scoped to this domain so all
