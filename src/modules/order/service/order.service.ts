@@ -1045,9 +1045,20 @@ class OrderService {
   }
 
   /**
-   * Verify the Razorpay client-side payment handshake. The webhook is the
-   * source of truth, but this mutation gives the client a fast happy-path
-   * to render the success screen without waiting for webhook latency.
+   * Verify the Razorpay client-side payment handshake AND finalize the
+   * order in the same request. The Razorpay webhook is the safety net —
+   * if the customer's browser closes mid-callback or the network drops,
+   * the webhook still finalises the order minutes later. Verification
+   * here is the same set the webhook applies (signature + fetchPayment
+   * + amount + authorised/captured status), so promoting it to a
+   * finaliser does not weaken the trust model.
+   *
+   * Idempotency: a single MongoDB transaction guards the status flip,
+   * QR-payload generation, and per-variant inventory $inc using
+   * `qrCodeData` as the sentinel — if the webhook (or a second
+   * fast-path call) lands second, it sees the QR is already set and
+   * exits without double-decrementing inventory or re-posting the
+   * ledger.
    */
   async confirmPayment(
     customerId: string,
@@ -1055,12 +1066,12 @@ class OrderService {
     razorpayPaymentId: string,
     razorpaySignature: string
   ): Promise<Order> {
-    const order = await OrderModel.findOne({
+    const existing = await OrderModel.findOne({
       razorpayOrderId,
       customerId,
       isDeleted: false,
     }).lean<Order & { _id: any }>();
-    if (!order) throw new ErrorWithProps("Order not found");
+    if (!existing) throw new ErrorWithProps("Order not found");
 
     const razorpay = getRazorpayPayments();
     const signatureOk = razorpay.verifyCheckoutSignature({
@@ -1082,7 +1093,9 @@ class OrderService {
     if (payment?.order_id !== razorpayOrderId) {
       throw new ErrorWithProps("Payment does not match this order");
     }
-    const expectedAmountPaise = Math.round(Number(order.totalAmount ?? 0) * 100);
+    const expectedAmountPaise = Math.round(
+      Number(existing.totalAmount ?? 0) * 100
+    );
     if (Number(payment?.amount ?? 0) !== expectedAmountPaise) {
       throw new ErrorWithProps("Payment amount does not match this order");
     }
@@ -1091,25 +1104,181 @@ class OrderService {
       throw new ErrorWithProps("Payment is not authorised by Razorpay");
     }
 
-    if (order.orderStatus === OrderStatus.PAYMENT_PENDING) {
-      // The webhook handler is the source of truth for status flip + QR
-      // generation under a Mongo transaction. This mutation just records
-      // the client-side handshake so a fast success screen can render
-      // before the webhook lands.
-      await OrderModel.updateOne(
-        { _id: order._id },
-        {
-          $set: {
-            razorpayPaymentId,
-            razorpaySignature,
-          },
+    const razorpayFee =
+      (Number((payment as any)?.fee ?? 0) +
+        Number((payment as any)?.tax ?? 0)) /
+      100;
+
+    let finalized: any = null;
+    const session = await mongoose.startSession();
+    try {
+      await session.withTransaction(async () => {
+        const order = await OrderModel.findById(existing._id).session(session);
+        if (!order) return;
+
+        // Idempotency sentinel: qrCodeData is set only on successful
+        // finalisation (here or by the webhook). If it's already there
+        // the work has been done by the other path — return the
+        // already-finalised order.
+        if (order.qrCodeData) {
+          finalized = order.toObject();
+          return;
         }
-      );
-      (order as any).razorpayPaymentId = razorpayPaymentId;
-      (order as any).razorpaySignature = razorpaySignature;
+
+        // Only PAYMENT_PENDING orders can transition to PAYMENT_SUCCESS
+        // via the fast-path. PAYMENT_FAILED / CANCELLED / REFUNDED /
+        // SUPERSEDED are all the webhook's domain — if the customer
+        // somehow drives the success callback against one of those,
+        // bail and let the webhook handle the late-capture/manual
+        // refund accounting.
+        if (order.orderStatus !== OrderStatus.PAYMENT_PENDING) {
+          finalized = order.toObject();
+          return;
+        }
+
+        const event = await EventModel.findById(order.eventId)
+          .select("tickets extras")
+          .session(session)
+          .lean();
+        if (!event) throw new ErrorWithProps("Event no longer exists");
+
+        // Re-check inventory before incrementing. The webhook does the
+        // same assertion under the same transaction — keeps both paths
+        // consistent against an oversold race.
+        const ticketMap = new Map(
+          (event.tickets ?? []).map((t: any) => [String(t._id), t])
+        );
+        const extraMap = new Map(
+          (event.extras ?? []).map((e: any) => [String(e._id), e])
+        );
+        for (const line of order.tickets ?? []) {
+          const ticket: any = ticketMap.get(String(line.ticketTypeId));
+          if (!ticket) {
+            throw new ErrorWithProps(
+              `${line.ticketName ?? "Ticket"} is no longer available`
+            );
+          }
+          const capacity = Number(ticket.ticketCapacity ?? 0);
+          const sold = Number(ticket.ticketSold ?? 0);
+          const quantity = Number(line.quantity ?? 0);
+          if (sold + quantity > capacity) {
+            throw new ErrorWithProps(
+              `${line.ticketName ?? "Ticket"} is no longer available in this quantity`
+            );
+          }
+        }
+        for (const line of order.extras ?? []) {
+          const extra: any = extraMap.get(String(line.extraId));
+          if (!extra) {
+            throw new ErrorWithProps(
+              `${line.extraName ?? "Add-on"} is no longer available`
+            );
+          }
+          const capacity = Number(extra.quantity ?? 0);
+          const sold = Number(extra.sold ?? 0);
+          const quantity = Number(line.quantity ?? 0);
+          if (sold + quantity > capacity) {
+            throw new ErrorWithProps(
+              `${line.extraName ?? "Add-on"} is no longer available in this quantity`
+            );
+          }
+        }
+
+        const qrPayload = `hoizr:${order._id.toString()}:${razorpayPaymentId}`;
+        const qrHash = crypto
+          .createHmac("sha256", EnvVars.values.ENCRYPTION_KEY)
+          .update(qrPayload)
+          .digest("hex");
+
+        order.orderStatus = OrderStatus.PAYMENT_SUCCESS;
+        order.razorpayPaymentId = razorpayPaymentId;
+        order.razorpaySignature = razorpaySignature;
+        order.razorpayFee = razorpayFee;
+        order.qrCodeData = qrPayload;
+        order.qrCodeHash = qrHash;
+        await order.save({ session });
+
+        const ticketOps = (order.tickets ?? []).map((line: any) => ({
+          updateOne: {
+            filter: { _id: order.eventId, "tickets._id": line.ticketTypeId },
+            update: { $inc: { "tickets.$.ticketSold": line.quantity } },
+          },
+        }));
+        const extraOps = (order.extras ?? []).map((line: any) => ({
+          updateOne: {
+            filter: { _id: order.eventId, "extras._id": line.extraId },
+            update: { $inc: { "extras.$.sold": line.quantity } },
+          },
+        }));
+        if (ticketOps.length || extraOps.length) {
+          await EventModel.bulkWrite([...ticketOps, ...extraOps], { session });
+        }
+
+        const now = new Date();
+        await EventModel.updateOne(
+          { _id: order.eventId, firstSaleAt: { $exists: false } },
+          { $set: { firstSaleAt: now } },
+          { session }
+        );
+        await EventModel.updateOne(
+          { _id: order.eventId },
+          { $set: { lastSaleAt: now } },
+          { session }
+        );
+
+        await this.supersedeSiblingPendingOrders(
+          order.customerId,
+          order.eventId.toString(),
+          order._id.toString(),
+          session
+        );
+
+        finalized = order.toObject();
+      });
+    } finally {
+      await session.endSession();
     }
 
-    return order as Order;
+    if (!finalized) {
+      // Transaction returned without finalising — most likely the order
+      // disappeared between the initial read and the session lookup.
+      return existing as Order;
+    }
+
+    // Best-effort cart cleanup outside the transaction — same as the
+    // webhook's releaseCartLocksBestEffort. Cart Redis state is not
+    // critical-path for the customer's ticket render, so a Redis blip
+    // here should not roll back the order finalisation.
+    try {
+      await this.cart.finalizeCartForOrder(
+        finalized.customerId,
+        finalized.eventId.toString()
+      );
+    } catch {
+      // Cart cleanup is advisory; the order is already finalised.
+    }
+
+    // Fanout the lifecycle work (ledger + ticket email + SMS + follows
+    // log) via the post-purchase worker. Deterministic jobId keeps the
+    // webhook + this fast-path from running the fanout twice.
+    if (finalized.orderStatus === OrderStatus.PAYMENT_SUCCESS) {
+      await postPurchaseQueue.add(
+        "APPLY_FOLLOWS_AND_SALES_LOG",
+        { orderId: finalized._id.toString() },
+        {
+          jobId: `post_purchase:${finalized._id.toString()}`,
+          attempts: 3,
+          backoff: { type: "exponential", delay: 5000 },
+        }
+      );
+      await soldOutTriggerQueue.add(
+        "CHECK_AFTER_SALE",
+        { eventId: finalized.eventId.toString() },
+        { attempts: 2 }
+      );
+    }
+
+    return finalized as Order;
   }
 }
 
