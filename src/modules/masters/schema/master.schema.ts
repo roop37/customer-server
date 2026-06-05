@@ -1,4 +1,9 @@
-import { EventCategory, GenreTag } from "@hoizr-technology/shared";
+import {
+  EventCategory,
+  GenreTag,
+  LanguageMaster,
+  ProhibitedItemMaster,
+} from "@hoizr-technology/shared";
 import {
   getModelForClass,
   ModelOptions,
@@ -13,6 +18,14 @@ const EventCategoryModel = getModelForClass(EventCategory, {
 
 const GenreTagModel = getModelForClass(GenreTag, {
   schemaOptions: { timestamps: true, collection: "genretags" },
+});
+
+const LanguageMasterModel = getModelForClass(LanguageMaster, {
+  schemaOptions: { timestamps: true },
+});
+
+const ProhibitedItemMasterModel = getModelForClass(ProhibitedItemMaster, {
+  schemaOptions: { timestamps: true },
 });
 
 @ObjectType("IndianCity")
@@ -69,4 +82,8 @@ export {
   EventCategoryModel,
   GenreTag,
   GenreTagModel,
+  LanguageMaster,
+  LanguageMasterModel,
+  ProhibitedItemMaster,
+  ProhibitedItemMasterModel,
 };

@@ -9,10 +9,12 @@ var __metadata = (this && this.__metadata) || function (k, v) {
     if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.GenreTagModel = exports.GenreTag = exports.EventCategoryModel = exports.EventCategory = exports.CityModel = exports.City = void 0;
+exports.ProhibitedItemMasterModel = exports.ProhibitedItemMaster = exports.LanguageMasterModel = exports.LanguageMaster = exports.GenreTagModel = exports.GenreTag = exports.EventCategoryModel = exports.EventCategory = exports.CityModel = exports.City = void 0;
 const shared_1 = require("@hoizr-technology/shared");
 Object.defineProperty(exports, "EventCategory", { enumerable: true, get: function () { return shared_1.EventCategory; } });
 Object.defineProperty(exports, "GenreTag", { enumerable: true, get: function () { return shared_1.GenreTag; } });
+Object.defineProperty(exports, "LanguageMaster", { enumerable: true, get: function () { return shared_1.LanguageMaster; } });
+Object.defineProperty(exports, "ProhibitedItemMaster", { enumerable: true, get: function () { return shared_1.ProhibitedItemMaster; } });
 const typegoose_1 = require("@typegoose/typegoose");
 const type_graphql_1 = require("type-graphql");
 const EventCategoryModel = (0, typegoose_1.getModelForClass)(shared_1.EventCategory, {
@@ -23,6 +25,14 @@ const GenreTagModel = (0, typegoose_1.getModelForClass)(shared_1.GenreTag, {
     schemaOptions: { timestamps: true, collection: "genretags" },
 });
 exports.GenreTagModel = GenreTagModel;
+const LanguageMasterModel = (0, typegoose_1.getModelForClass)(shared_1.LanguageMaster, {
+    schemaOptions: { timestamps: true },
+});
+exports.LanguageMasterModel = LanguageMasterModel;
+const ProhibitedItemMasterModel = (0, typegoose_1.getModelForClass)(shared_1.ProhibitedItemMaster, {
+    schemaOptions: { timestamps: true },
+});
+exports.ProhibitedItemMasterModel = ProhibitedItemMasterModel;
 let City = class City {
 };
 exports.City = City;

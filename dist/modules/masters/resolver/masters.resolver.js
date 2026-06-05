@@ -28,6 +28,16 @@ let MastersResolver = class MastersResolver {
             .sort({ value: 1 })
             .lean();
     }
+    async getActiveLanguages() {
+        return master_schema_1.LanguageMasterModel.find({ status: true })
+            .sort({ isIndian: -1, order: 1, value: 1 })
+            .lean();
+    }
+    async getActiveProhibitedItems() {
+        return master_schema_1.ProhibitedItemMasterModel.find({ status: true })
+            .sort({ order: 1, value: 1 })
+            .lean();
+    }
 };
 exports.MastersResolver = MastersResolver;
 __decorate([
@@ -48,6 +58,18 @@ __decorate([
     __metadata("design:paramtypes", []),
     __metadata("design:returntype", Promise)
 ], MastersResolver.prototype, "getActiveGenreTags", null);
+__decorate([
+    (0, type_graphql_1.Query)(() => [master_schema_1.LanguageMaster]),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", []),
+    __metadata("design:returntype", Promise)
+], MastersResolver.prototype, "getActiveLanguages", null);
+__decorate([
+    (0, type_graphql_1.Query)(() => [master_schema_1.ProhibitedItemMaster]),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", []),
+    __metadata("design:returntype", Promise)
+], MastersResolver.prototype, "getActiveProhibitedItems", null);
 exports.MastersResolver = MastersResolver = __decorate([
     (0, type_graphql_1.Resolver)()
 ], MastersResolver);
