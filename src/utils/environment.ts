@@ -33,6 +33,15 @@ const zodEnvSchema = z.object({
   RAZORPAY_KEY_SECRET: z.string().min(1, "RAZORPAY_KEY_SECRET is not present"),
   RAZORPAY_WEBHOOK_SECRET: z.string().min(1, "RAZORPAY_WEBHOOK_SECRET is not present"),
 
+  // Cloudinary credentials. Optional at this layer — hoizr-workers
+  // writes the invoice PDFs; customer-server only re-signs short-lived
+  // download URLs on demand for the "Download invoice" button. When the
+  // credentials aren't present (e.g. local dev without invoice infra),
+  // the resolver surfaces a clear error instead of crashing at boot.
+  CLOUDINARY_CLOUD_NAME: z.string().optional(),
+  CLOUDINARY_API_KEY: z.string().optional(),
+  CLOUDINARY_API_SECRET: z.string().optional(),
+
   // Google OAuth web client ID. Used server-side to verify the ID token
   // returned by @react-oauth/google on hoizr-client. The same client ID
   // must be configured on the frontend (NEXT_PUBLIC_GOOGLE_OAUTH_CLIENT_ID).

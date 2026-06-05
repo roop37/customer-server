@@ -5,7 +5,10 @@ import {
   CreateOrderInput,
   MyOrdersFilterInput,
 } from "../interfaces/order.input";
-import { CreateOrderResponse } from "../interfaces/order.objects";
+import {
+  CreateOrderResponse,
+  CustomerOrderInvoice,
+} from "../interfaces/order.objects";
 import { CustomerOrderView, toCustomerOrderView } from "../interfaces/order.view";
 import OrderService from "../service/order.service";
 
@@ -104,5 +107,14 @@ export class OrderResolver {
       orderId
     );
     return order ? toCustomerOrderView(order) : null;
+  }
+
+  @Query(() => CustomerOrderInvoice, { nullable: true })
+  @UseMiddleware(isCustomerAuthenticated)
+  async getMyOrderInvoice(
+    @Ctx() ctx: Context,
+    @Arg("orderId") orderId: string
+  ): Promise<CustomerOrderInvoice | null> {
+    return this.service.getMyOrderInvoice(ctx.customerId as string, orderId);
   }
 }
