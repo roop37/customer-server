@@ -27,6 +27,9 @@ import { PayoutModel } from "../../payout/schema/payout.schema";
 import { CreateOrderInput } from "../interfaces/order.input";
 import { RazorpayCheckoutPayload } from "../interfaces/order.objects";
 import { Order, OrderModel } from "../schema/order.schema";
+import { InvoiceModel } from "../schema/invoice.schema";
+import { generateSignedPdfUrl } from "../../../utils/cloudinary";
+import { InvoiceType } from "@hoizr-technology/shared";
 
 type CreateOrderServiceResult = {
   order: Order;
@@ -948,6 +951,63 @@ class OrderService {
       customerId,
       isDeleted: false,
     }).lean<Order>();
+  }
+
+  /**
+   * Mint a fresh signed Cloudinary URL for the customer-platform-fee
+   * invoice tied to this order. The PDF itself is produced server-side
+   * by the paid-order-fanout worker — if that hasn't run yet (race with
+   * webhook delivery) or the invoice job failed, this resolves to null
+   * and the UI tells the customer to retry shortly or check their email.
+   *
+   * Authorisation: the order must belong to the calling customer.
+   * Without this check a leaked orderId would expose another customer's
+   * invoice PII + GSTIN.
+   */
+  async getMyOrderInvoice(
+    customerId: string,
+    orderId: string
+  ): Promise<{
+    invoiceNumber: string;
+    pdfUrl: string;
+    expiresAt: Date;
+    dateOfIssue?: Date;
+  } | null> {
+    if (!isAlphanumeric(orderId)) {
+      throw new ErrorWithProps("Invalid order id");
+    }
+
+    const order = await OrderModel.findOne({
+      _id: orderId,
+      customerId,
+      isDeleted: false,
+    })
+      .select("_id customerId")
+      .lean<{ _id: any; customerId: string }>();
+    if (!order) throw new ErrorWithProps("Order not found");
+
+    const invoice = await InvoiceModel.findOne({
+      relatedOrderId: orderId,
+      type: InvoiceType.CUSTOMER_PLATFORM_FEE_INVOICE,
+      isVoided: { $ne: true },
+    })
+      .select("invoiceNumber pdfStoragePublicId dateOfIssue")
+      .lean<{
+        invoiceNumber: string;
+        pdfStoragePublicId?: string;
+        dateOfIssue?: Date;
+      }>();
+    if (!invoice || !invoice.pdfStoragePublicId) return null;
+
+    const { signedUrl, expiresAt } = generateSignedPdfUrl(
+      invoice.pdfStoragePublicId
+    );
+    return {
+      invoiceNumber: invoice.invoiceNumber,
+      pdfUrl: signedUrl,
+      expiresAt,
+      dateOfIssue: invoice.dateOfIssue,
+    };
   }
 
   async requestOrderRefund(
