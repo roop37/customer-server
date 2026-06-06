@@ -29,10 +29,45 @@ const zodEnvSchema = zod_1.z.object({
     RAZORPAY_KEY_ID: zod_1.z.string().min(1, "RAZORPAY_KEY_ID is not present"),
     RAZORPAY_KEY_SECRET: zod_1.z.string().min(1, "RAZORPAY_KEY_SECRET is not present"),
     RAZORPAY_WEBHOOK_SECRET: zod_1.z.string().min(1, "RAZORPAY_WEBHOOK_SECRET is not present"),
+    // Cloudinary credentials. Optional at this layer — hoizr-workers
+    // writes the invoice PDFs; customer-server only re-signs short-lived
+    // download URLs on demand for the "Download invoice" button. When the
+    // credentials aren't present (e.g. local dev without invoice infra),
+    // the resolver surfaces a clear error instead of crashing at boot.
+    CLOUDINARY_CLOUD_NAME: zod_1.z.string().optional(),
+    CLOUDINARY_API_KEY: zod_1.z.string().optional(),
+    CLOUDINARY_API_SECRET: zod_1.z.string().optional(),
     // Google OAuth web client ID. Used server-side to verify the ID token
     // returned by @react-oauth/google on hoizr-client. The same client ID
     // must be configured on the frontend (NEXT_PUBLIC_GOOGLE_OAUTH_CLIENT_ID).
     GOOGLE_OAUTH_CLIENT_ID: zod_1.z.string().min(1, "GOOGLE_OAUTH_CLIENT_ID is not present"),
+    // Instagram API with Instagram Login (the successor to the deprecated
+    // Basic Display API). All four are optional — when META_INSTAGRAM_APP_ID
+    // is unset the connect mutation falls back to the deterministic stub
+    // fetcher so the feature stays demoable. See docs/INSTAGRAM_CONNECT.md
+    // for the dashboard setup that produces these values.
+    //
+    // META_INSTAGRAM_APP_ID          — the Instagram App ID from
+    //                                  developers.facebook.com → your app →
+    //                                  Use cases → Instagram → API setup with
+    //                                  Instagram Login → "Instagram App ID".
+    // META_INSTAGRAM_APP_SECRET      — paired secret. Server-side only.
+    // META_INSTAGRAM_REDIRECT_URI    — must match the OAuth Redirect URI
+    //                                  configured on Meta byte-for-byte.
+    // META_INSTAGRAM_STATE_SECRET    — hex string used to HMAC the OAuth
+    //                                  `state` blob. `openssl rand -hex 32`.
+    // META_INSTAGRAM_TOKEN_KEY       — 64-hex AES-256 key used to encrypt
+    //                                  the long-lived access token before
+    //                                  persisting to Mongo. `openssl rand -hex 32`.
+    // META_INSTAGRAM_FRONTEND_RETURN — URL on hoizr-client to bounce back to
+    //                                  after the callback finishes (e.g.
+    //                                  https://hoizr.com/me/profile).
+    META_INSTAGRAM_APP_ID: zod_1.z.string().optional(),
+    META_INSTAGRAM_APP_SECRET: zod_1.z.string().optional(),
+    META_INSTAGRAM_REDIRECT_URI: zod_1.z.string().optional(),
+    META_INSTAGRAM_STATE_SECRET: zod_1.z.string().optional(),
+    META_INSTAGRAM_TOKEN_KEY: zod_1.z.string().optional(),
+    META_INSTAGRAM_FRONTEND_RETURN: zod_1.z.string().optional(),
 });
 class EnvVars {
     static initialize() {

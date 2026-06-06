@@ -260,5 +260,88 @@ class PublicEventService {
         }
         return { artists, organizers };
     }
+    /**
+     * Public events linked to an artist via the lineup. Split into
+     * upcoming/past around `now`. Used by the lineup card mini-profile
+     * modal so the customer can scan what else this artist is on.
+     * Visibility gated like every other public query (published, not
+     * deleted, not admin-paused).
+     */
+    async getArtistPastUpcomingEvents(artistId, limitPerBucket = 6) {
+        if (!artistId || !mongoose_1.Types.ObjectId.isValid(artistId)) {
+            return { upcoming: [], past: [] };
+        }
+        const now = new Date();
+        const baseFilter = {
+            isDeleted: false,
+            isVisible: true,
+            status: shared_1.EventStatus.PUBLISHED,
+            adminPaused: { $ne: true },
+            // Match either a real Artist (lineup.artistLinkId) or a phantom
+            // (lineup.tempArtistId) so the modal works for both kinds.
+            $or: [
+                { "lineup.artistLinkId": artistId },
+                { "lineup.tempArtistId": artistId },
+            ],
+        };
+        const projection = {
+            title: 1,
+            slug: 1,
+            eventFlyer: 1,
+            horizontalFlyer: 1,
+            city: 1,
+            startDate: 1,
+        };
+        const [upcoming, past] = await Promise.all([
+            event_schema_1.EventModel.find({ ...baseFilter, startDate: { $gte: now } }, projection)
+                .sort({ startDate: 1 })
+                .limit(limitPerBucket)
+                .lean(),
+            event_schema_1.EventModel.find({ ...baseFilter, startDate: { $lt: now } }, projection)
+                .sort({ startDate: -1 })
+                .limit(limitPerBucket)
+                .lean(),
+        ]);
+        return { upcoming, past };
+    }
+    /**
+     * Public events linked to a host as primary organiser OR as a
+     * collaborator. Same shape + visibility gates as the artist version.
+     */
+    async getOrganizerPastUpcomingEvents(hostId, limitPerBucket = 6) {
+        if (!hostId || !mongoose_1.Types.ObjectId.isValid(hostId)) {
+            return { upcoming: [], past: [] };
+        }
+        const now = new Date();
+        const baseFilter = {
+            isDeleted: false,
+            isVisible: true,
+            status: shared_1.EventStatus.PUBLISHED,
+            adminPaused: { $ne: true },
+            $or: [
+                { hostId },
+                { "eventCollaborationBusiness.businessLinkId": hostId },
+            ],
+        };
+        const projection = {
+            title: 1,
+            slug: 1,
+            eventFlyer: 1,
+            horizontalFlyer: 1,
+            city: 1,
+            startDate: 1,
+        };
+        const [upcoming, past] = await Promise.all([
+            event_schema_1.EventModel.find({ ...baseFilter, startDate: { $gte: now } }, projection)
+                .sort({ startDate: 1 })
+                .limit(limitPerBucket)
+                .lean(),
+            event_schema_1.EventModel.find({ ...baseFilter, startDate: { $lt: now } }, projection)
+                .sort({ startDate: -1 })
+                .limit(limitPerBucket)
+                .lean(),
+        ]);
+        return { upcoming, past };
+    }
 }
 exports.default = PublicEventService;

@@ -46,6 +46,34 @@ const zodEnvSchema = z.object({
   // returned by @react-oauth/google on hoizr-client. The same client ID
   // must be configured on the frontend (NEXT_PUBLIC_GOOGLE_OAUTH_CLIENT_ID).
   GOOGLE_OAUTH_CLIENT_ID: z.string().min(1, "GOOGLE_OAUTH_CLIENT_ID is not present"),
+
+  // Instagram API with Instagram Login (the successor to the deprecated
+  // Basic Display API). All four are optional — when META_INSTAGRAM_APP_ID
+  // is unset the connect mutation falls back to the deterministic stub
+  // fetcher so the feature stays demoable. See docs/INSTAGRAM_CONNECT.md
+  // for the dashboard setup that produces these values.
+  //
+  // META_INSTAGRAM_APP_ID          — the Instagram App ID from
+  //                                  developers.facebook.com → your app →
+  //                                  Use cases → Instagram → API setup with
+  //                                  Instagram Login → "Instagram App ID".
+  // META_INSTAGRAM_APP_SECRET      — paired secret. Server-side only.
+  // META_INSTAGRAM_REDIRECT_URI    — must match the OAuth Redirect URI
+  //                                  configured on Meta byte-for-byte.
+  // META_INSTAGRAM_STATE_SECRET    — hex string used to HMAC the OAuth
+  //                                  `state` blob. `openssl rand -hex 32`.
+  // META_INSTAGRAM_TOKEN_KEY       — 64-hex AES-256 key used to encrypt
+  //                                  the long-lived access token before
+  //                                  persisting to Mongo. `openssl rand -hex 32`.
+  // META_INSTAGRAM_FRONTEND_RETURN — URL on hoizr-client to bounce back to
+  //                                  after the callback finishes (e.g.
+  //                                  https://hoizr.com/me/profile).
+  META_INSTAGRAM_APP_ID: z.string().optional(),
+  META_INSTAGRAM_APP_SECRET: z.string().optional(),
+  META_INSTAGRAM_REDIRECT_URI: z.string().optional(),
+  META_INSTAGRAM_STATE_SECRET: z.string().optional(),
+  META_INSTAGRAM_TOKEN_KEY: z.string().optional(),
+  META_INSTAGRAM_FRONTEND_RETURN: z.string().optional(),
 });
 
 type TEnv = z.infer<typeof zodEnvSchema>;

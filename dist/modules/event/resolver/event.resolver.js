@@ -37,6 +37,12 @@ let PublicEventResolver = class PublicEventResolver {
     async getPublicEventPeople(eventId) {
         return this.service.getEventPeople(eventId);
     }
+    async getArtistPastUpcomingEvents(artistId) {
+        return this.service.getArtistPastUpcomingEvents(artistId);
+    }
+    async getOrganizerPastUpcomingEvents(hostId) {
+        return this.service.getOrganizerPastUpcomingEvents(hostId);
+    }
 };
 exports.PublicEventResolver = PublicEventResolver;
 __decorate([
@@ -67,6 +73,20 @@ __decorate([
     __metadata("design:paramtypes", [String]),
     __metadata("design:returntype", Promise)
 ], PublicEventResolver.prototype, "getPublicEventPeople", null);
+__decorate([
+    (0, type_graphql_1.Query)(() => event_objects_1.PublicArtistOrOrganizerEvents),
+    __param(0, (0, type_graphql_1.Arg)("artistId", () => String)),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [String]),
+    __metadata("design:returntype", Promise)
+], PublicEventResolver.prototype, "getArtistPastUpcomingEvents", null);
+__decorate([
+    (0, type_graphql_1.Query)(() => event_objects_1.PublicArtistOrOrganizerEvents),
+    __param(0, (0, type_graphql_1.Arg)("hostId", () => String)),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [String]),
+    __metadata("design:returntype", Promise)
+], PublicEventResolver.prototype, "getOrganizerPastUpcomingEvents", null);
 exports.PublicEventResolver = PublicEventResolver = __decorate([
     (0, type_graphql_1.Resolver)()
 ], PublicEventResolver);
