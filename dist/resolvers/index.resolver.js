@@ -7,6 +7,7 @@ const auth_resolver_1 = require("../modules/auth/resolver/auth.resolver");
 const cart_resolver_1 = require("../modules/cart/resolver/cart.resolver");
 const customer_resolver_1 = require("../modules/customer/resolver/customer.resolver");
 const customer_instagram_resolver_1 = require("../modules/customerInstagram/resolver/customer-instagram.resolver");
+const customer_places_resolver_1 = require("../modules/customerPlaces/resolver/customer-places.resolver");
 const event_resolver_1 = require("../modules/event/resolver/event.resolver");
 const masters_resolver_1 = require("../modules/masters/resolver/masters.resolver");
 const order_resolver_1 = require("../modules/order/resolver/order.resolver");
@@ -15,6 +16,7 @@ exports.resolvers = [
     auth_resolver_1.AuthResolver,
     customer_resolver_1.CustomerResolver,
     customer_instagram_resolver_1.CustomerInstagramResolver,
+    customer_places_resolver_1.CustomerPlacesResolver,
     event_resolver_1.PublicEventResolver,
     masters_resolver_1.MastersResolver,
     cart_resolver_1.CartResolver,

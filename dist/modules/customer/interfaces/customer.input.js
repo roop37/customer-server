@@ -40,6 +40,10 @@ __decorate([
     __metadata("design:type", String)
 ], UpdateCustomerProfileInput.prototype, "city", void 0);
 __decorate([
+    (0, type_graphql_1.Field)(() => shared_1.AddressInfoInput, { nullable: true }),
+    __metadata("design:type", shared_1.AddressInfoInput)
+], UpdateCustomerProfileInput.prototype, "address", void 0);
+__decorate([
     (0, type_graphql_1.Field)(() => [shared_1.Genre], { nullable: true }),
     __metadata("design:type", Array)
 ], UpdateCustomerProfileInput.prototype, "genrePreferences", void 0);

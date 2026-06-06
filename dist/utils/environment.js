@@ -68,6 +68,11 @@ const zodEnvSchema = zod_1.z.object({
     META_INSTAGRAM_STATE_SECRET: zod_1.z.string().optional(),
     META_INSTAGRAM_TOKEN_KEY: zod_1.z.string().optional(),
     META_INSTAGRAM_FRONTEND_RETURN: zod_1.z.string().optional(),
+    // Google Maps server-side key used by the address-autocomplete
+    // queries on /me/profile. Optional — when unset, the resolver
+    // surfaces a clear error so misconfigured environments fail loud
+    // rather than 200-OKing with empty results.
+    MAPS_API_KEY: zod_1.z.string().optional(),
 });
 class EnvVars {
     static initialize() {

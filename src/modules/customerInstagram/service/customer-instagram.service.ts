@@ -383,7 +383,12 @@ class CustomerInstagramService {
             lastSyncedAt: now,
             lastPushedAvatar: profile.avatar || undefined,
           },
-          $setOnInsert: { attendeeVisibility: false },
+          // First-time connect defaults to visible: the value of the
+        // attendees feature is reciprocal (you only see others who are
+        // visible themselves), so the friction of an opt-in toggle
+        // killed adoption. Users who want to hide flip the toggle in
+        // their profile settings (the only place it's exposed).
+        $setOnInsert: { attendeeVisibility: true },
         },
         { new: true, upsert: true, lean: true }
       );
@@ -430,7 +435,12 @@ class CustomerInstagramService {
           lastSyncedAt: now,
           lastPushedAvatar: stub.avatar || undefined,
         },
-        $setOnInsert: { attendeeVisibility: false },
+        // First-time connect defaults to visible: the value of the
+        // attendees feature is reciprocal (you only see others who are
+        // visible themselves), so the friction of an opt-in toggle
+        // killed adoption. Users who want to hide flip the toggle in
+        // their profile settings (the only place it's exposed).
+        $setOnInsert: { attendeeVisibility: true },
       },
       { new: true, upsert: true, lean: true }
     );
