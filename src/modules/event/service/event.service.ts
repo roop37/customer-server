@@ -9,10 +9,12 @@ import {
 } from "../schema/event.schema";
 import { PublicEventFilterInput } from "../interfaces/event.input";
 import {
+  PublicArtistOrOrganizerEvents,
   PublicEventArtistEntry,
   PublicEventOrganizerEntry,
   PublicEventPaginatedResponse,
   PublicEventPeopleResponse,
+  PublicEventSummary,
 } from "../interfaces/event.objects";
 
 const escapeRegex = (value: string): string =>
@@ -297,6 +299,115 @@ class PublicEventService {
     }
 
     return { artists, organizers };
+  }
+
+  /**
+   * Public events linked to an artist via the lineup. Split into
+   * upcoming/past around `now`. Used by the lineup card mini-profile
+   * modal so the customer can scan what else this artist is on.
+   * Visibility gated like every other public query (published, not
+   * deleted, not admin-paused).
+   */
+  async getArtistPastUpcomingEvents(
+    artistId: string,
+    limitPerBucket = 6
+  ): Promise<PublicArtistOrOrganizerEvents> {
+    if (!artistId || !Types.ObjectId.isValid(artistId)) {
+      return { upcoming: [], past: [] };
+    }
+    const now = new Date();
+    const baseFilter = {
+      isDeleted: false,
+      isVisible: true,
+      status: EventStatus.PUBLISHED,
+      adminPaused: { $ne: true },
+      // Match either a real Artist (lineup.artistLinkId) or a phantom
+      // (lineup.tempArtistId) so the modal works for both kinds.
+      $or: [
+        { "lineup.artistLinkId": artistId },
+        { "lineup.tempArtistId": artistId },
+      ],
+    };
+
+    const projection = {
+      title: 1,
+      slug: 1,
+      eventFlyer: 1,
+      horizontalFlyer: 1,
+      city: 1,
+      startDate: 1,
+    } as const;
+
+    const [upcoming, past] = await Promise.all([
+      EventModel.find(
+        { ...baseFilter, startDate: { $gte: now } },
+        projection
+      )
+        .sort({ startDate: 1 })
+        .limit(limitPerBucket)
+        .lean<PublicEventSummary[]>(),
+      EventModel.find(
+        { ...baseFilter, startDate: { $lt: now } },
+        projection
+      )
+        .sort({ startDate: -1 })
+        .limit(limitPerBucket)
+        .lean<PublicEventSummary[]>(),
+    ]);
+
+    return { upcoming, past };
+  }
+
+  /**
+   * Public events linked to a host as primary organiser OR as a
+   * collaborator. Same shape + visibility gates as the artist version.
+   */
+  async getOrganizerPastUpcomingEvents(
+    hostId: string,
+    limitPerBucket = 6
+  ): Promise<PublicArtistOrOrganizerEvents> {
+    if (!hostId || !Types.ObjectId.isValid(hostId)) {
+      return { upcoming: [], past: [] };
+    }
+    const now = new Date();
+    const baseFilter = {
+      isDeleted: false,
+      isVisible: true,
+      status: EventStatus.PUBLISHED,
+      adminPaused: { $ne: true },
+      $or: [
+        { hostId },
+        { "eventCollaborationBusiness.businessLinkId": hostId },
+      ],
+    };
+
+    const projection = {
+      title: 1,
+      slug: 1,
+      eventFlyer: 1,
+      horizontalFlyer: 1,
+      city: 1,
+      startDate: 1,
+    } as const;
+
+    const [upcoming, past] = await Promise.all([
+      EventModel.find(
+        { ...baseFilter, startDate: { $gte: now } },
+        projection
+      )
+        .sort({ startDate: 1 })
+        .limit(limitPerBucket)
+        .lean<PublicEventSummary[]>(),
+      EventModel.find(
+        { ...baseFilter, startDate: { $lt: now } },
+        projection
+      )
+        .sort({ startDate: -1 })
+        .limit(limitPerBucket)
+        .lean<PublicEventSummary[]>(),
+    ]);
+
+    return { upcoming, past };
   }
 }
 

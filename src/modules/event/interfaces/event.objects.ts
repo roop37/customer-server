@@ -90,3 +90,42 @@ export class PublicEventPeopleResponse {
   @Field(() => [PublicEventOrganizerEntry])
   organizers: PublicEventOrganizerEntry[];
 }
+
+/**
+ * Slim event summary used by the lineup/organizer mini-profile modal.
+ * Bigger than a card preview but smaller than the full Event doc —
+ * just enough to render a 2-up grid of "past + upcoming events for
+ * this artist / this organiser" without paying for the full schema.
+ */
+@ObjectType()
+export class PublicEventSummary {
+  @Field(() => String)
+  _id: string;
+
+  @Field(() => String, { nullable: true })
+  title?: string;
+
+  @Field(() => String, { nullable: true })
+  slug?: string;
+
+  @Field(() => String, { nullable: true })
+  eventFlyer?: string;
+
+  @Field(() => String, { nullable: true })
+  horizontalFlyer?: string;
+
+  @Field(() => String, { nullable: true })
+  city?: string;
+
+  @Field(() => Date, { nullable: true })
+  startDate?: Date;
+}
+
+@ObjectType()
+export class PublicArtistOrOrganizerEvents {
+  @Field(() => [PublicEventSummary])
+  upcoming: PublicEventSummary[];
+
+  @Field(() => [PublicEventSummary])
+  past: PublicEventSummary[];
+}
