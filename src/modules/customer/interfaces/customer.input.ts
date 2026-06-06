@@ -1,4 +1,8 @@
-import { Gender, Genre } from "@hoizr-technology/shared";
+import {
+  AddressInfoInput,
+  Gender,
+  Genre,
+} from "@hoizr-technology/shared";
 import { Field, InputType } from "type-graphql";
 
 @InputType()
@@ -20,6 +24,14 @@ export class UpdateCustomerProfileInput {
 
   @Field(() => String, { nullable: true })
   city?: string;
+
+  /**
+   * Saved home address — optional. Drives event distance badges and
+   * personalised sort. Pass `null` (after destructuring the field on
+   * the client) to clear; omit to leave unchanged.
+   */
+  @Field(() => AddressInfoInput, { nullable: true })
+  address?: AddressInfoInput;
 
   @Field(() => [Genre], { nullable: true })
   genrePreferences?: Genre[];
