@@ -48,6 +48,7 @@ require("reflect-metadata");
 const type_graphql_1 = require("type-graphql");
 const logger_1 = require("./log/logger");
 const index_resolver_1 = require("./resolvers/index.resolver");
+const instagram_oauth_route_1 = require("./routes/instagram-oauth.route");
 const razorpay_webhook_route_1 = require("./routes/razorpay-webhook.route");
 const cookie_2 = require("./utils/cookie");
 const dbConnection_1 = require("./utils/dbConnection");
@@ -180,6 +181,7 @@ async function startServer() {
             },
         });
         (0, razorpay_webhook_route_1.registerRazorpayWebhook)(app);
+        (0, instagram_oauth_route_1.registerInstagramOAuth)(app);
         app.get("/", async (_req, res) => {
             res.status(200).send("Hoizr customer-server healthy");
         });

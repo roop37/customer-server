@@ -9,7 +9,7 @@ var __metadata = (this && this.__metadata) || function (k, v) {
     if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.PublicEventPeopleResponse = exports.PublicEventOrganizerEntry = exports.PublicEventArtistEntry = exports.PublicEventPaginatedResponse = void 0;
+exports.PublicArtistOrOrganizerEvents = exports.PublicEventSummary = exports.PublicEventPeopleResponse = exports.PublicEventOrganizerEntry = exports.PublicEventArtistEntry = exports.PublicEventPaginatedResponse = void 0;
 const shared_1 = require("@hoizr-technology/shared");
 const type_graphql_1 = require("type-graphql");
 let PublicEventPaginatedResponse = class PublicEventPaginatedResponse {
@@ -136,3 +136,57 @@ __decorate([
 exports.PublicEventPeopleResponse = PublicEventPeopleResponse = __decorate([
     (0, type_graphql_1.ObjectType)()
 ], PublicEventPeopleResponse);
+/**
+ * Slim event summary used by the lineup/organizer mini-profile modal.
+ * Bigger than a card preview but smaller than the full Event doc —
+ * just enough to render a 2-up grid of "past + upcoming events for
+ * this artist / this organiser" without paying for the full schema.
+ */
+let PublicEventSummary = class PublicEventSummary {
+};
+exports.PublicEventSummary = PublicEventSummary;
+__decorate([
+    (0, type_graphql_1.Field)(() => String),
+    __metadata("design:type", String)
+], PublicEventSummary.prototype, "_id", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => String, { nullable: true }),
+    __metadata("design:type", String)
+], PublicEventSummary.prototype, "title", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => String, { nullable: true }),
+    __metadata("design:type", String)
+], PublicEventSummary.prototype, "slug", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => String, { nullable: true }),
+    __metadata("design:type", String)
+], PublicEventSummary.prototype, "eventFlyer", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => String, { nullable: true }),
+    __metadata("design:type", String)
+], PublicEventSummary.prototype, "horizontalFlyer", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => String, { nullable: true }),
+    __metadata("design:type", String)
+], PublicEventSummary.prototype, "city", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => Date, { nullable: true }),
+    __metadata("design:type", Date)
+], PublicEventSummary.prototype, "startDate", void 0);
+exports.PublicEventSummary = PublicEventSummary = __decorate([
+    (0, type_graphql_1.ObjectType)()
+], PublicEventSummary);
+let PublicArtistOrOrganizerEvents = class PublicArtistOrOrganizerEvents {
+};
+exports.PublicArtistOrOrganizerEvents = PublicArtistOrOrganizerEvents;
+__decorate([
+    (0, type_graphql_1.Field)(() => [PublicEventSummary]),
+    __metadata("design:type", Array)
+], PublicArtistOrOrganizerEvents.prototype, "upcoming", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => [PublicEventSummary]),
+    __metadata("design:type", Array)
+], PublicArtistOrOrganizerEvents.prototype, "past", void 0);
+exports.PublicArtistOrOrganizerEvents = PublicArtistOrOrganizerEvents = __decorate([
+    (0, type_graphql_1.ObjectType)()
+], PublicArtistOrOrganizerEvents);

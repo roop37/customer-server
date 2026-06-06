@@ -19,6 +19,9 @@ const customer_schema_1 = require("../../customer/schema/customer.schema");
 const event_schema_1 = require("../../event/schema/event.schema");
 const payout_schema_1 = require("../../payout/schema/payout.schema");
 const order_schema_1 = require("../schema/order.schema");
+const invoice_schema_1 = require("../schema/invoice.schema");
+const cloudinary_1 = require("../../../utils/cloudinary");
+const shared_2 = require("@hoizr-technology/shared");
 const postPurchaseQueue = new bullmq_1.Queue(shared_1.QueueNames.postPurchaseQueue, {
     connection: redis_1.redisClient,
     defaultJobOptions: {
@@ -657,6 +660,47 @@ class OrderService {
             customerId,
             isDeleted: false,
         }).lean();
+    }
+    /**
+     * Mint a fresh signed Cloudinary URL for the customer-platform-fee
+     * invoice tied to this order. The PDF itself is produced server-side
+     * by the paid-order-fanout worker — if that hasn't run yet (race with
+     * webhook delivery) or the invoice job failed, this resolves to null
+     * and the UI tells the customer to retry shortly or check their email.
+     *
+     * Authorisation: the order must belong to the calling customer.
+     * Without this check a leaked orderId would expose another customer's
+     * invoice PII + GSTIN.
+     */
+    async getMyOrderInvoice(customerId, orderId) {
+        if (!(0, validations_1.isAlphanumeric)(orderId)) {
+            throw new mercurius_1.ErrorWithProps("Invalid order id");
+        }
+        const order = await order_schema_1.OrderModel.findOne({
+            _id: orderId,
+            customerId,
+            isDeleted: false,
+        })
+            .select("_id customerId")
+            .lean();
+        if (!order)
+            throw new mercurius_1.ErrorWithProps("Order not found");
+        const invoice = await invoice_schema_1.InvoiceModel.findOne({
+            relatedOrderId: orderId,
+            type: shared_2.InvoiceType.CUSTOMER_PLATFORM_FEE_INVOICE,
+            isVoided: { $ne: true },
+        })
+            .select("invoiceNumber pdfStoragePublicId dateOfIssue")
+            .lean();
+        if (!invoice || !invoice.pdfStoragePublicId)
+            return null;
+        const { signedUrl, expiresAt } = (0, cloudinary_1.generateSignedPdfUrl)(invoice.pdfStoragePublicId);
+        return {
+            invoiceNumber: invoice.invoiceNumber,
+            pdfUrl: signedUrl,
+            expiresAt,
+            dateOfIssue: invoice.dateOfIssue,
+        };
     }
     async requestOrderRefund(customerId, orderId, reason) {
         if (!(0, validations_1.isAlphanumeric)(orderId)) {

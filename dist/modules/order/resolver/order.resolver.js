@@ -61,6 +61,9 @@ let OrderResolver = class OrderResolver {
         const order = await this.service.getMyOrderById(ctx.customerId, orderId);
         return order ? (0, order_view_1.toCustomerOrderView)(order) : null;
     }
+    async getMyOrderInvoice(ctx, orderId) {
+        return this.service.getMyOrderInvoice(ctx.customerId, orderId);
+    }
 };
 exports.OrderResolver = OrderResolver;
 __decorate([
@@ -120,6 +123,15 @@ __decorate([
     __metadata("design:paramtypes", [Object, String]),
     __metadata("design:returntype", Promise)
 ], OrderResolver.prototype, "getMyOrderById", null);
+__decorate([
+    (0, type_graphql_1.Query)(() => order_objects_1.CustomerOrderInvoice, { nullable: true }),
+    (0, type_graphql_1.UseMiddleware)(customer_auth_1.isCustomerAuthenticated),
+    __param(0, (0, type_graphql_1.Ctx)()),
+    __param(1, (0, type_graphql_1.Arg)("orderId")),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [Object, String]),
+    __metadata("design:returntype", Promise)
+], OrderResolver.prototype, "getMyOrderInvoice", null);
 exports.OrderResolver = OrderResolver = __decorate([
     (0, type_graphql_1.Resolver)()
 ], OrderResolver);

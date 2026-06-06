@@ -10,6 +10,7 @@ import "reflect-metadata";
 import { buildTypeDefsAndResolvers } from "type-graphql";
 import { logger } from "./log/logger";
 import { resolvers as typedResolvers } from "./resolvers/index.resolver";
+import { registerInstagramOAuth } from "./routes/instagram-oauth.route";
 import { registerRazorpayWebhook } from "./routes/razorpay-webhook.route";
 import Context from "./types/context.type";
 import {
@@ -177,6 +178,7 @@ async function startServer() {
     });
 
     registerRazorpayWebhook(app);
+    registerInstagramOAuth(app);
 
     app.get("/", async (_req, res) => {
       res.status(200).send("Hoizr customer-server healthy");
