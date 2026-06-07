@@ -47,6 +47,21 @@ async function startServer() {
       routes: ["/webhooks/razorpay"],
     });
 
+    app.addContentTypeParser(
+      "application/x-www-form-urlencoded",
+      { parseAs: "string" },
+      (_request, body, done) => {
+        try {
+          done(
+            null,
+            Object.fromEntries(new URLSearchParams(String(body)))
+          );
+        } catch (error) {
+          done(error as Error, undefined);
+        }
+      }
+    );
+
     await app.register(helmet, { contentSecurityPolicy: isProduction });
 
     const configuredCorsOrigins = EnvVars.values.CUSTOMER_CORS_ORIGINS

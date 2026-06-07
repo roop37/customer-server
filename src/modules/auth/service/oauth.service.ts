@@ -10,7 +10,7 @@ import {
   incrementRateLimit,
   resetRateLimit,
 } from "../../../utils/rateLimit";
-import { isValidPhone } from "../../../utils/validations";
+import { normalizeCustomerPhone } from "../../../utils/validations";
 import {
   createCustomerAuthTokens,
   storeCustomerRefreshToken,
@@ -161,10 +161,11 @@ class OAuthService {
   async pendingSignupRequestOtp(
     input: CustomerPendingSignupRequestOtpInput
   ): Promise<{ otpId: string }> {
-    const phone = input.phone.trim();
-    if (!isValidPhone(phone)) {
+    const normalized = normalizeCustomerPhone(input.phone);
+    if (!normalized) {
       throw new ErrorWithProps("Invalid phone number");
     }
+    const { raw, e164 } = normalized;
 
     const pending = await readPendingSignup(input.pendingToken);
     if (!pending) {
@@ -174,7 +175,7 @@ class OAuthService {
       );
     }
 
-    const rlKey = `customer_otp_request:${phone}`;
+    const rlKey = `customer_otp_request:${e164}`;
     if (!(await checkRateLimit(rlKey))) {
       throw new ErrorWithProps(
         "Too many OTP requests for this number. Try again later."
@@ -182,12 +183,17 @@ class OAuthService {
     }
     await incrementRateLimit(rlKey);
 
-    const existing = await CustomerModel.findOne({ phone, isDeleted: false })
+    const existing = await CustomerModel.findOne({
+      $or: [{ phoneE164: e164 }, { phone: e164 }, { phone: raw }],
+      isDeleted: false,
+    })
       .select("_id")
       .lean();
-    const otpId = await this.otp.generateOtp(phone, Boolean(existing));
+    const otpId = await this.otp.generateOtp(e164, Boolean(existing));
 
-    await updatePendingSignup(input.pendingToken, { phone, otpId });
+    // Always persist E.164 in pending — the verify step reads back from
+    // here and writes the customer doc.
+    await updatePendingSignup(input.pendingToken, { phone: e164, otpId });
 
     return { otpId };
   }
@@ -243,12 +249,19 @@ class OAuthService {
       });
     }
 
-    const existing = await CustomerModel.findOne({ phone, isDeleted: false });
+    // `phone` from the pending entry is now always E.164 (post-D16). For
+    // pre-D16 pending entries that were created before this rollout, the
+    // dual-lookup still finds the legacy record.
+    const existing = await CustomerModel.findOne({
+      $or: [{ phoneE164: phone }, { phone }],
+      isDeleted: false,
+    });
 
     if (!existing) {
       // Case E — clean signup.
       const customer = await CustomerModel.create({
         phone,
+        phoneE164: phone,
         firstName,
         lastName,
         email: emailToUse,

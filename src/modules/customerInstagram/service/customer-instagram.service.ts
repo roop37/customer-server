@@ -473,11 +473,8 @@ class CustomerInstagramService {
     const result = await CustomerInstagramModel.updateOne(
       { customerId },
       {
-        $set: {
-          connected: false,
-          accessToken: undefined,
-          tokenExpiresAt: undefined,
-        },
+        $set: { connected: false },
+        $unset: { accessToken: "", tokenExpiresAt: "" },
       }
     );
     return result.acknowledged === true;
@@ -576,11 +573,8 @@ class CustomerInstagramService {
           await CustomerInstagramModel.updateOne(
             { customerId },
             {
-              $set: {
-                connected: false,
-                accessToken: undefined,
-                tokenExpiresAt: undefined,
-              },
+              $set: { connected: false },
+              $unset: { accessToken: "", tokenExpiresAt: "" },
             }
           );
           return CustomerInstagramModel.findOne({
