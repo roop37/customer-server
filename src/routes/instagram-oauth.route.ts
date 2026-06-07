@@ -1,6 +1,9 @@
 import type { FastifyInstance } from "fastify";
+import crypto from "crypto";
+import { nanoid } from "nanoid";
 import { logger } from "../log/logger";
 import CustomerInstagramService from "../modules/customerInstagram/service/customer-instagram.service";
+import { CustomerInstagramModel } from "../modules/customerInstagram/schema/customer-instagram.schema";
 import {
   signState,
   verifyState,
@@ -40,6 +43,56 @@ const AUTHORIZE_BASE = "https://www.instagram.com/oauth/authorize";
 // scopes would require App Review at higher tiers and we don't ship
 // them for our read-only feature.
 const SCOPES = ["instagram_business_basic"];
+
+type InstagramSignedRequest = {
+  user_id?: string | number;
+  user_id_str?: string;
+  issued_at?: number;
+  algorithm?: string;
+};
+
+const verifySignedRequest = (
+  signedRequest: string | undefined
+): InstagramSignedRequest | null => {
+  if (!signedRequest) return null;
+  const secret = EnvVars.values.META_INSTAGRAM_APP_SECRET;
+  if (!secret) return null;
+
+  const [sigB64, payloadB64] = signedRequest.split(".");
+  if (!sigB64 || !payloadB64) return null;
+
+  const expected = crypto
+    .createHmac("sha256", secret)
+    .update(payloadB64)
+    .digest();
+  let provided: Buffer;
+  try {
+    provided = Buffer.from(sigB64, "base64url");
+  } catch {
+    return null;
+  }
+  if (
+    provided.length !== expected.length ||
+    !crypto.timingSafeEqual(provided, expected)
+  ) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(
+      Buffer.from(payloadB64, "base64url").toString("utf8")
+    ) as InstagramSignedRequest;
+  } catch {
+    return null;
+  }
+};
+
+const instagramUserIdFromSignedRequest = (
+  payload: InstagramSignedRequest | null
+): string | null => {
+  const value = payload?.user_id_str ?? payload?.user_id;
+  return value === undefined || value === null ? null : String(value);
+};
 
 const buildAuthorizeUrl = (state: string): string => {
   const u = new URL(AUTHORIZE_BASE);
@@ -137,5 +190,48 @@ export const registerInstagramOAuth = (app: FastifyInstance) => {
         })
       );
     }
+  });
+
+  app.post("/auth/instagram/deauthorize", async (req, reply) => {
+    const body = (req.body as { signed_request?: string } | undefined) ?? {};
+    const payload = verifySignedRequest(body.signed_request);
+    const instagramUserId = instagramUserIdFromSignedRequest(payload);
+    if (!instagramUserId) {
+      reply.code(401).send({ ok: false });
+      return;
+    }
+
+    await CustomerInstagramModel.updateOne(
+      { instagramUserId },
+      {
+        $set: { connected: false },
+        $unset: { accessToken: "", tokenExpiresAt: "" },
+      }
+    );
+    reply.send({ ok: true });
+  });
+
+  app.post("/auth/instagram/deletion", async (req, reply) => {
+    const body = (req.body as { signed_request?: string } | undefined) ?? {};
+    const payload = verifySignedRequest(body.signed_request);
+    const instagramUserId = instagramUserIdFromSignedRequest(payload);
+    if (!instagramUserId) {
+      reply.code(401).send({ ok: false });
+      return;
+    }
+
+    const confirmationCode = nanoid(12);
+    await CustomerInstagramModel.deleteOne({ instagramUserId });
+
+    const confirmationUrl = new URL(
+      "/account/instagram-deletion",
+      EnvVars.values.APP_URL
+    );
+    confirmationUrl.searchParams.set("ref", confirmationCode);
+
+    reply.send({
+      url: confirmationUrl.toString(),
+      confirmation_code: confirmationCode,
+    });
   });
 };
