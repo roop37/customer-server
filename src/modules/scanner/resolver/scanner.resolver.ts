@@ -2,13 +2,16 @@ import { Arg, Ctx, Mutation, Query, Resolver, UseMiddleware } from "type-graphql
 import { isScannerAuthenticated } from "../../../middlewares/scanner-auth";
 import Context from "../../../types/context.type";
 import {
+  OfflineScanInput,
   ScanTicketInput,
   ScannerLoginInput,
 } from "../interfaces/scanner.input";
 import {
+  OfflineScanResult,
   ScanTicketResponse,
   ScannerEventSummary,
   ScannerLoginResponse,
+  ScannerManifest,
   ScannerRefreshResponse,
 } from "../interfaces/scanner.objects";
 import ScannerService from "../service/scanner.service";
@@ -50,5 +53,28 @@ export class ScannerResolver {
     @Ctx() ctx: Context
   ): Promise<ScanTicketResponse> {
     return this.service.scanTicket(input, ctx);
+  }
+
+  /**
+   * AUDIT-016: download every valid ticket for the scanner's event so the
+   * app can validate + admit guests fully offline.
+   */
+  @Query(() => ScannerManifest)
+  @UseMiddleware(isScannerAuthenticated)
+  async scannerEventManifest(@Ctx() ctx: Context): Promise<ScannerManifest> {
+    return this.service.getEventManifest(ctx);
+  }
+
+  /**
+   * AUDIT-016: replay queued offline check-ins once the network is back.
+   * Returns a per-item result so the client can reconcile conflicts.
+   */
+  @Mutation(() => [OfflineScanResult])
+  @UseMiddleware(isScannerAuthenticated)
+  async syncOfflineScans(
+    @Arg("scans", () => [OfflineScanInput]) scans: OfflineScanInput[],
+    @Ctx() ctx: Context
+  ): Promise<OfflineScanResult[]> {
+    return this.service.syncOfflineScans(scans, ctx);
   }
 }

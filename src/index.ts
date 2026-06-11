@@ -11,6 +11,7 @@ import { buildTypeDefsAndResolvers } from "type-graphql";
 import { logger } from "./log/logger";
 import { resolvers as typedResolvers } from "./resolvers/index.resolver";
 import { registerInstagramOAuth } from "./routes/instagram-oauth.route";
+import { registerInternalOfflineOrderRoute } from "./routes/internal-offline-order.route";
 import { registerRazorpayWebhook } from "./routes/razorpay-webhook.route";
 import Context from "./types/context.type";
 import {
@@ -44,7 +45,7 @@ async function startServer() {
       field: "rawBody",
       global: false,
       encoding: false,
-      routes: ["/webhooks/razorpay"],
+      routes: ["/webhooks/razorpay", "/internal/offline-order/issue"],
     });
 
     app.addContentTypeParser(
@@ -193,6 +194,7 @@ async function startServer() {
     });
 
     registerRazorpayWebhook(app);
+    registerInternalOfflineOrderRoute(app);
     registerInstagramOAuth(app);
 
     app.get("/", async (_req, res) => {

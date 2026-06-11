@@ -29,6 +29,11 @@ const zodEnvSchema = zod_1.z.object({
     RAZORPAY_KEY_ID: zod_1.z.string().min(1, "RAZORPAY_KEY_ID is not present"),
     RAZORPAY_KEY_SECRET: zod_1.z.string().min(1, "RAZORPAY_KEY_SECRET is not present"),
     RAZORPAY_WEBHOOK_SECRET: zod_1.z.string().min(1, "RAZORPAY_WEBHOOK_SECRET is not present"),
+    // Shared secret for HMAC-authenticated internal service calls (main-server
+    // → customer-server, e.g. issuing an offline ticket order). Optional at
+    // boot; when unset the internal route rejects every call (fails closed).
+    // Must match main-server's INTERNAL_SERVICE_SECRET in each environment.
+    INTERNAL_SERVICE_SECRET: zod_1.z.string().optional(),
     // Cloudinary credentials. Optional at this layer — hoizr-workers
     // writes the invoice PDFs; customer-server only re-signs short-lived
     // download URLs on demand for the "Download invoice" button. When the

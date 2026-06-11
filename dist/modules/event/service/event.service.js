@@ -13,7 +13,9 @@ class PublicEventService {
         const visibilityFilter = {
             isDeleted: false,
             isVisible: true,
-            status: shared_1.EventStatus.PUBLISHED,
+            // AUDIT-065: completed events must still RENDER (detail pages, past-event
+            // buckets) — only PURCHASE gates (cart/order) stay PUBLISHED-only.
+            status: { $in: [shared_1.EventStatus.PUBLISHED, shared_1.EventStatus.COMPLETED] },
             adminPaused: { $ne: true },
         };
         const event = await event_schema_1.EventModel.findOne({
@@ -44,7 +46,9 @@ class PublicEventService {
             _id: id,
             isDeleted: false,
             isVisible: true,
-            status: shared_1.EventStatus.PUBLISHED,
+            // AUDIT-065: completed events must still RENDER (detail pages, past-event
+            // buckets) — only PURCHASE gates (cart/order) stay PUBLISHED-only.
+            status: { $in: [shared_1.EventStatus.PUBLISHED, shared_1.EventStatus.COMPLETED] },
             adminPaused: { $ne: true },
         }).lean();
         return event ?? null;
@@ -140,7 +144,9 @@ class PublicEventService {
             _id: eventId,
             isDeleted: false,
             isVisible: true,
-            status: shared_1.EventStatus.PUBLISHED,
+            // AUDIT-065: completed events must still RENDER (detail pages, past-event
+            // buckets) — only PURCHASE gates (cart/order) stay PUBLISHED-only.
+            status: { $in: [shared_1.EventStatus.PUBLISHED, shared_1.EventStatus.COMPLETED] },
             adminPaused: { $ne: true },
         }).lean();
         if (!event)
@@ -275,7 +281,9 @@ class PublicEventService {
         const baseFilter = {
             isDeleted: false,
             isVisible: true,
-            status: shared_1.EventStatus.PUBLISHED,
+            // AUDIT-065: completed events must still RENDER (detail pages, past-event
+            // buckets) — only PURCHASE gates (cart/order) stay PUBLISHED-only.
+            status: { $in: [shared_1.EventStatus.PUBLISHED, shared_1.EventStatus.COMPLETED] },
             adminPaused: { $ne: true },
             // Match either a real Artist (lineup.artistLinkId) or a phantom
             // (lineup.tempArtistId) so the modal works for both kinds.
@@ -316,7 +324,9 @@ class PublicEventService {
         const baseFilter = {
             isDeleted: false,
             isVisible: true,
-            status: shared_1.EventStatus.PUBLISHED,
+            // AUDIT-065: completed events must still RENDER (detail pages, past-event
+            // buckets) — only PURCHASE gates (cart/order) stay PUBLISHED-only.
+            status: { $in: [shared_1.EventStatus.PUBLISHED, shared_1.EventStatus.COMPLETED] },
             adminPaused: { $ne: true },
             $or: [
                 { hostId },

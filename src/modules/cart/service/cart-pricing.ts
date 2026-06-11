@@ -15,9 +15,13 @@ import { CartPricing } from "../interfaces/cart.objects";
  *   3. The customer-facing platform fee has its own GST (typically 18%)
  *      which Hoizr collects and remits to govt.
  *
- * Math is done on rupee values (pricing snapshots in this codebase store
- * money as rupees with 2-decimal precision via `+.toFixed(2)`). Future
- * refactor: migrate to integer paise + basis points per SoT §7.
+ * AUDIT-068: all arithmetic is done in INTEGER PAISE (no float `toFixed`
+ * drift). Each percentage is applied to a paise integer and rounded to the
+ * nearest paise — ticket GST is rounded per line, the way a real invoice
+ * is — so the total is exact and `totalPaise === Σ component paise`. The
+ * function still RETURNS rupee values (paise / 100) so the GraphQL contract
+ * + the UI stay in rupees; the Razorpay boundary uses `Math.round(total *
+ * 100)` which equals `totalPaise` exactly because total = totalPaise / 100.
  */
 
 export type CartTicketRef = {
@@ -87,69 +91,93 @@ export type CartPricingInput = {
   host?: CartHostGstContext | null;
 };
 
+// rupees → integer paise (nearest paise; handles any fractional input).
+const toPaise = (rupees: number): number => Math.round(Number(rupees) * 100);
+// integer paise → rupees, exact for a paise integer.
+const toRupees = (paise: number): number => paise / 100;
+// percentOf a paise integer, rounded to the nearest paise. `percent` may be
+// fractional (e.g. an OTHER ticket gstRate); rounding per call mirrors how a
+// real invoice rounds each line item.
+const pctOfPaise = (paise: number, percent: number): number =>
+  Math.round((paise * percent) / 100);
+
 export const computeCartPricingForLines = (
   input: CartPricingInput
 ): CartPricing => {
-  const ticketsGross = input.ticketLines.reduce(
-    (sum, l) => sum + l.unitPrice * l.quantity,
+  const ticketsGrossPaise = input.ticketLines.reduce(
+    (sum, l) => sum + toPaise(l.unitPrice) * Math.max(0, Math.trunc(l.quantity)),
     0
   );
-  const extrasGross = input.extraLines.reduce(
-    (sum, l) => sum + l.unitPrice * l.quantity,
+  const extrasGrossPaise = input.extraLines.reduce(
+    (sum, l) => sum + toPaise(l.unitPrice) * Math.max(0, Math.trunc(l.quantity)),
     0
   );
 
-  // Ticket TAXABLE value = sum of ticket face values + extras. This is
-  // the base for BOTH the customer-facing platform fee AND the host-side
-  // commission. Ticket GST sits ABOVE this and is pass-through to host.
-  const ticketTaxableValue = +(ticketsGross + extrasGross).toFixed(2);
+  // Ticket TAXABLE value = sum of ticket face values + extras. Base for BOTH
+  // the customer-facing platform fee AND the host-side commission. Ticket
+  // GST sits ABOVE this and is pass-through to the host.
+  const taxablePaise = ticketsGrossPaise + extrasGrossPaise;
 
-  // Ticket GST is only collected when the host is GST-eligible. For
-  // ineligible hosts, the ticket face value is final and customer pays
-  // no GST line.
+  // Ticket GST only when the host is GST-eligible. Rounded PER LINE.
   const eligibleForTicketGst = canHostCollectTicketGst(input.host);
-  const taxes = eligibleForTicketGst
-    ? +input.ticketLines
-        .reduce((sum, l) => {
-          if (!l.ticketId) return sum;
-          const ref = input.ticketRefs.get(l.ticketId);
-          if (!ref) return sum;
-          const rate = resolveGstRateForTicket(ref);
-          return sum + l.unitPrice * l.quantity * (rate / 100);
-        }, 0)
-        .toFixed(2)
+  const taxesPaise = eligibleForTicketGst
+    ? input.ticketLines.reduce((sum, l) => {
+        if (!l.ticketId) return sum;
+        const ref = input.ticketRefs.get(l.ticketId);
+        if (!ref) return sum;
+        const rate = resolveGstRateForTicket(ref);
+        const lineTaxablePaise =
+          toPaise(l.unitPrice) * Math.max(0, Math.trunc(l.quantity));
+        return sum + pctOfPaise(lineTaxablePaise, rate);
+      }, 0)
     : 0;
 
-  // Customer-facing platform fee on ticket taxable value (NOT on
-  // taxable + ticket GST). Hoizr never charges fee on govt's GST.
-  const applicationFee = +(
-    ticketTaxableValue * (input.applicationFeePercent / 100)
-  ).toFixed(2);
+  // Customer-facing platform fee on the ticket taxable value only (NOT on
+  // taxable + ticket GST). Hoizr never charges a fee on govt's GST.
+  const applicationFeePaise = pctOfPaise(
+    taxablePaise,
+    input.applicationFeePercent
+  );
 
   // GST on Hoizr's own platform fee. Hoizr remits this to govt.
   const applicationFeeGstPercent = input.applicationFeeGstPercent ?? 18;
-  const platformFeeGst = +(
-    applicationFee * (applicationFeeGstPercent / 100)
-  ).toFixed(2);
+  const platformFeeGstPaise = pctOfPaise(
+    applicationFeePaise,
+    applicationFeeGstPercent
+  );
 
-  const totalAmount = +(
-    ticketTaxableValue +
-    taxes +
-    applicationFee +
-    platformFeeGst
-  ).toFixed(2);
+  const totalPaise =
+    taxablePaise + taxesPaise + applicationFeePaise + platformFeeGstPaise;
 
   const taxesPercent =
-    ticketTaxableValue > 0
-      ? +((taxes / ticketTaxableValue) * 100).toFixed(2)
+    taxablePaise > 0
+      ? Math.round((taxesPaise / taxablePaise) * 10000) / 100
       : 0;
 
+  // Reconciliation invariant (AUDIT-068): the total must equal the sum of
+  // its parts to the exact paise, and the rupee total must map back to the
+  // same paise the Razorpay boundary will charge. Integer math guarantees
+  // both — this assert is a tripwire against a future refactor breaking it.
+  const componentsPaise =
+    taxablePaise + taxesPaise + applicationFeePaise + platformFeeGstPaise;
+  const totalAmount = toRupees(totalPaise);
+  if (
+    componentsPaise !== totalPaise ||
+    Math.round(totalAmount * 100) !== totalPaise
+  ) {
+    throw new Error(
+      `Cart pricing reconciliation failed: components=${componentsPaise} total=${totalPaise} roundtrip=${Math.round(
+        totalAmount * 100
+      )}`
+    );
+  }
+
   return {
-    grossAmount: ticketTaxableValue,
-    applicationFee,
+    grossAmount: toRupees(taxablePaise),
+    applicationFee: toRupees(applicationFeePaise),
     applicationFeePercent: input.applicationFeePercent,
-    platformFeeGst,
-    taxes,
+    platformFeeGst: toRupees(platformFeeGstPaise),
+    taxes: toRupees(taxesPaise),
     taxesPercent,
     totalAmount,
   };

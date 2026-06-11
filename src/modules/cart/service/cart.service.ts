@@ -1,6 +1,7 @@
 import {
   ConfigTypeEnum,
   EventStatus,
+  OrderStatus,
   VerificationStatus,
 } from "@hoizr-technology/shared";
 import { getCachedConfigNumber } from "../../../utils/configs-cache";
@@ -72,7 +73,7 @@ class CartService {
     const cutoff = new Date(Date.now() - RedisKeys.LOCK_TTL_SECONDS * 1000);
     const pending = await OrderModel.find({
       eventId,
-      orderStatus: "PaymentPending",
+      orderStatus: OrderStatus.PAYMENT_PENDING,
       reservedAt: { $gte: cutoff },
     })
       .select("tickets extras")

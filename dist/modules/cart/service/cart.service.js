@@ -27,7 +27,7 @@ class CartService {
         const cutoff = new Date(Date.now() - redis_1.RedisKeys.LOCK_TTL_SECONDS * 1000);
         const pending = await order_schema_1.OrderModel.find({
             eventId,
-            orderStatus: "PaymentPending",
+            orderStatus: shared_1.OrderStatus.PAYMENT_PENDING,
             reservedAt: { $gte: cutoff },
         })
             .select("tickets extras")

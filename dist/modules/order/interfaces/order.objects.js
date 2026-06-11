@@ -9,7 +9,7 @@ var __metadata = (this && this.__metadata) || function (k, v) {
     if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.CustomerOrderInvoice = exports.CreateOrderResponse = exports.RazorpayCheckoutPayload = void 0;
+exports.CustomerOrderInvoice = exports.GuestCheckoutResponse = exports.OfflinePaymentLinkView = exports.OfflineLinkLine = exports.CreateOrderResponse = exports.RazorpayCheckoutPayload = void 0;
 const type_graphql_1 = require("type-graphql");
 const order_view_1 = require("./order.view");
 let RazorpayCheckoutPayload = class RazorpayCheckoutPayload {
@@ -52,6 +52,113 @@ __decorate([
 exports.CreateOrderResponse = CreateOrderResponse = __decorate([
     (0, type_graphql_1.ObjectType)()
 ], CreateOrderResponse);
+let OfflineLinkLine = class OfflineLinkLine {
+};
+exports.OfflineLinkLine = OfflineLinkLine;
+__decorate([
+    (0, type_graphql_1.Field)(() => String),
+    __metadata("design:type", String)
+], OfflineLinkLine.prototype, "itemId", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => String),
+    __metadata("design:type", String)
+], OfflineLinkLine.prototype, "name", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => Number),
+    __metadata("design:type", Number)
+], OfflineLinkLine.prototype, "quantity", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => Number),
+    __metadata("design:type", Number)
+], OfflineLinkLine.prototype, "unitPrice", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => Boolean),
+    __metadata("design:type", Boolean)
+], OfflineLinkLine.prototype, "isExtra", void 0);
+exports.OfflineLinkLine = OfflineLinkLine = __decorate([
+    (0, type_graphql_1.ObjectType)()
+], OfflineLinkLine);
+/** Prefill payload for a shared offline payment link (hoizr.com/t/<code>). */
+let OfflinePaymentLinkView = class OfflinePaymentLinkView {
+};
+exports.OfflinePaymentLinkView = OfflinePaymentLinkView;
+__decorate([
+    (0, type_graphql_1.Field)(() => String),
+    __metadata("design:type", String)
+], OfflinePaymentLinkView.prototype, "offlineOrderId", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => String),
+    __metadata("design:type", String)
+], OfflinePaymentLinkView.prototype, "eventId", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => String, { nullable: true }),
+    __metadata("design:type", String)
+], OfflinePaymentLinkView.prototype, "eventTitle", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => String, { nullable: true }),
+    __metadata("design:type", String)
+], OfflinePaymentLinkView.prototype, "eventFlyer", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => String, { nullable: true }),
+    __metadata("design:type", String)
+], OfflinePaymentLinkView.prototype, "eventSlug", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => [OfflineLinkLine]),
+    __metadata("design:type", Array)
+], OfflinePaymentLinkView.prototype, "lines", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => Number),
+    __metadata("design:type", Number)
+], OfflinePaymentLinkView.prototype, "amountTotal", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => String, { nullable: true }),
+    __metadata("design:type", String)
+], OfflinePaymentLinkView.prototype, "customerFirstName", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => String, { nullable: true }),
+    __metadata("design:type", String)
+], OfflinePaymentLinkView.prototype, "customerLastName", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => String, { nullable: true }),
+    __metadata("design:type", String)
+], OfflinePaymentLinkView.prototype, "customerEmail", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => String),
+    __metadata("design:type", String)
+], OfflinePaymentLinkView.prototype, "customerPhone", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => Boolean),
+    __metadata("design:type", Boolean)
+], OfflinePaymentLinkView.prototype, "alreadyPaid", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => Boolean),
+    __metadata("design:type", Boolean)
+], OfflinePaymentLinkView.prototype, "expired", void 0);
+exports.OfflinePaymentLinkView = OfflinePaymentLinkView = __decorate([
+    (0, type_graphql_1.ObjectType)()
+], OfflinePaymentLinkView);
+let GuestCheckoutResponse = class GuestCheckoutResponse {
+};
+exports.GuestCheckoutResponse = GuestCheckoutResponse;
+__decorate([
+    (0, type_graphql_1.Field)(() => order_view_1.CustomerOrderView),
+    __metadata("design:type", order_view_1.CustomerOrderView)
+], GuestCheckoutResponse.prototype, "order", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => RazorpayCheckoutPayload, { nullable: true }),
+    __metadata("design:type", RazorpayCheckoutPayload)
+], GuestCheckoutResponse.prototype, "checkout", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => Boolean),
+    __metadata("design:type", Boolean)
+], GuestCheckoutResponse.prototype, "accountFound", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => String, { nullable: true }),
+    __metadata("design:type", String)
+], GuestCheckoutResponse.prototype, "accountEmail", void 0);
+exports.GuestCheckoutResponse = GuestCheckoutResponse = __decorate([
+    (0, type_graphql_1.ObjectType)()
+], GuestCheckoutResponse);
 /**
  * Customer-facing invoice download payload. The signed URL is minted
  * fresh on every request (Cloudinary `private_download_url`) and is

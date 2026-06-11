@@ -9,6 +9,7 @@ import { CustomerPlacesResolver } from "../modules/customerPlaces/resolver/custo
 import { PublicEventResolver } from "../modules/event/resolver/event.resolver";
 import { MastersResolver } from "../modules/masters/resolver/masters.resolver";
 import { OrderResolver } from "../modules/order/resolver/order.resolver";
+import { CustomerFeedbackResolver } from "../modules/feedback/resolver/feedback.resolver";
 import { ScannerResolver } from "../modules/scanner/resolver/scanner.resolver";
 
 export const resolvers: NonEmptyArray<Function> = [
@@ -20,6 +21,7 @@ export const resolvers: NonEmptyArray<Function> = [
   MastersResolver,
   CartResolver,
   OrderResolver,
+  CustomerFeedbackResolver,
   ScannerResolver,
   ArtistFollowResolver,
   ArtistMerchOrderResolver,
