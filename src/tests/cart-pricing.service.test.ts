@@ -80,4 +80,41 @@ import { computeCartPricingForLines } from "../modules/cart/service/cart-pricing
   assert.equal(pricing.taxes, 0, "missing host context defaults to no ticket GST");
 })();
 
+// --- Scenario E: AUDIT-068 reconciliation — Σ component paise == total paise
+// across multi-line + odd amounts/rates that would drift under float math ---
+(() => {
+  const pricing = computeCartPricingForLines({
+    ticketLines: [
+      { ticketId: "t1", quantity: 3, unitPrice: 333 },
+      { ticketId: "t2", quantity: 1, unitPrice: 199 },
+    ],
+    extraLines: [{ quantity: 2, unitPrice: 49 }],
+    ticketRefs: new Map([
+      ["t1", { ticketGST: TicketGST.CGST_SGST_18 }],
+      ["t2", { ticketGST: TicketGST.OTHER, gstRate: 12 }],
+    ]),
+    applicationFeePercent: 5,
+    applicationFeeGstPercent: 18,
+    host: {
+      isGstRegistered: true,
+      gstin: "27ABCDE1234F1Z5",
+      gstRegistrationType: GstRegistrationType.REGULAR,
+    },
+  });
+
+  const toP = (n: number) => Math.round(n * 100);
+  const sumP =
+    toP(pricing.grossAmount) +
+    toP(pricing.taxes) +
+    toP(pricing.applicationFee) +
+    toP(pricing.platformFeeGst);
+  assert.equal(
+    sumP,
+    toP(pricing.totalAmount),
+    "components must sum to the total to the exact paise"
+  );
+  // grossAmount = 3*333 + 199 + 2*49 = 999 + 199 + 98 = 1296
+  assert.equal(pricing.grossAmount, 1296);
+})();
+
 console.log("cart-pricing.service.test.ts passed");

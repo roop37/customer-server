@@ -129,3 +129,68 @@ export class ScannerEventSummary {
   @Field(() => Int)
   totalScanned: number;
 }
+
+// AUDIT-016: offline manifest — one cached, scannable ticket.
+@ObjectType()
+export class ScannerManifestEntry {
+  @Field(() => ID)
+  orderId: string;
+
+  @Field(() => String)
+  qrCodeData: string;
+
+  @Field(() => String, { nullable: true })
+  customerName?: string;
+
+  @Field(() => String, { nullable: true })
+  customerPhone?: string;
+
+  @Field(() => [ScannedTicketLine])
+  tickets: ScannedTicketLine[];
+
+  @Field(() => Int)
+  totalTickets: number;
+
+  @Field(() => Boolean)
+  checkedIn: boolean;
+
+  @Field(() => Date, { nullable: true })
+  checkedInAt?: Date;
+
+  @Field(() => Boolean)
+  refunded: boolean;
+}
+
+@ObjectType()
+export class ScannerManifest {
+  @Field(() => ID)
+  eventId: string;
+
+  @Field(() => String, { nullable: true })
+  title?: string;
+
+  @Field(() => Date, { nullable: true })
+  startDate?: Date;
+
+  @Field(() => Date, { nullable: true })
+  endDate?: Date;
+
+  @Field(() => Date)
+  generatedAt: Date;
+
+  @Field(() => [ScannerManifestEntry])
+  entries: ScannerManifestEntry[];
+}
+
+// AUDIT-016: per-item result of replaying a queued offline scan.
+@ObjectType()
+export class OfflineScanResult {
+  @Field(() => String)
+  qrCodeData: string;
+
+  @Field(() => ScanResultStatus)
+  status: ScanResultStatus;
+
+  @Field(() => String)
+  message: string;
+}

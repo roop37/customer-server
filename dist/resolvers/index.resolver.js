@@ -11,6 +11,7 @@ const customer_places_resolver_1 = require("../modules/customerPlaces/resolver/c
 const event_resolver_1 = require("../modules/event/resolver/event.resolver");
 const masters_resolver_1 = require("../modules/masters/resolver/masters.resolver");
 const order_resolver_1 = require("../modules/order/resolver/order.resolver");
+const feedback_resolver_1 = require("../modules/feedback/resolver/feedback.resolver");
 const scanner_resolver_1 = require("../modules/scanner/resolver/scanner.resolver");
 exports.resolvers = [
     auth_resolver_1.AuthResolver,
@@ -21,6 +22,7 @@ exports.resolvers = [
     masters_resolver_1.MastersResolver,
     cart_resolver_1.CartResolver,
     order_resolver_1.OrderResolver,
+    feedback_resolver_1.CustomerFeedbackResolver,
     scanner_resolver_1.ScannerResolver,
     artist_follow_resolver_1.ArtistFollowResolver,
     artist_merch_order_resolver_1.ArtistMerchOrderResolver,

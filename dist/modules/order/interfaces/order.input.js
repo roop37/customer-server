@@ -9,7 +9,7 @@ var __metadata = (this && this.__metadata) || function (k, v) {
     if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.CreateOrderInput = exports.GuestInfoInput = exports.UTMInput = exports.MyOrdersFilterInput = void 0;
+exports.GuestOrderInput = exports.GuestCartExtraInput = exports.GuestCartTicketInput = exports.CreateOrderInput = exports.GuestInfoInput = exports.UTMInput = exports.MyOrdersFilterInput = void 0;
 const type_graphql_1 = require("type-graphql");
 let MyOrdersFilterInput = class MyOrdersFilterInput {
 };
@@ -103,3 +103,95 @@ __decorate([
 exports.CreateOrderInput = CreateOrderInput = __decorate([
     (0, type_graphql_1.InputType)()
 ], CreateOrderInput);
+let GuestCartTicketInput = class GuestCartTicketInput {
+};
+exports.GuestCartTicketInput = GuestCartTicketInput;
+__decorate([
+    (0, type_graphql_1.Field)(() => String),
+    __metadata("design:type", String)
+], GuestCartTicketInput.prototype, "ticketId", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => type_graphql_1.Int),
+    __metadata("design:type", Number)
+], GuestCartTicketInput.prototype, "quantity", void 0);
+exports.GuestCartTicketInput = GuestCartTicketInput = __decorate([
+    (0, type_graphql_1.InputType)()
+], GuestCartTicketInput);
+let GuestCartExtraInput = class GuestCartExtraInput {
+};
+exports.GuestCartExtraInput = GuestCartExtraInput;
+__decorate([
+    (0, type_graphql_1.Field)(() => String),
+    __metadata("design:type", String)
+], GuestCartExtraInput.prototype, "extraId", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => type_graphql_1.Int),
+    __metadata("design:type", Number)
+], GuestCartExtraInput.prototype, "quantity", void 0);
+exports.GuestCartExtraInput = GuestCartExtraInput = __decorate([
+    (0, type_graphql_1.InputType)()
+], GuestCartExtraInput);
+/**
+ * Guest checkout: a not-logged-in buyer submits their selected tickets +
+ * contact details together (the modal opened on "Continue to checkout").
+ * The server resolves/creates a customer by phone, seeds the cart, and runs
+ * the normal order flow.
+ */
+let GuestOrderInput = class GuestOrderInput {
+};
+exports.GuestOrderInput = GuestOrderInput;
+__decorate([
+    (0, type_graphql_1.Field)(() => String),
+    __metadata("design:type", String)
+], GuestOrderInput.prototype, "eventId", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => [GuestCartTicketInput]),
+    __metadata("design:type", Array)
+], GuestOrderInput.prototype, "tickets", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => [GuestCartExtraInput], { nullable: true }),
+    __metadata("design:type", Array)
+], GuestOrderInput.prototype, "extras", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => String),
+    __metadata("design:type", String)
+], GuestOrderInput.prototype, "firstName", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => String),
+    __metadata("design:type", String)
+], GuestOrderInput.prototype, "lastName", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => String),
+    __metadata("design:type", String)
+], GuestOrderInput.prototype, "email", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => String),
+    __metadata("design:type", String)
+], GuestOrderInput.prototype, "phone", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => Boolean, { nullable: true }),
+    __metadata("design:type", Boolean)
+], GuestOrderInput.prototype, "notifyMe", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => String, { nullable: true }),
+    __metadata("design:type", String)
+], GuestOrderInput.prototype, "offlineOrderId", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => UTMInput, { nullable: true }),
+    __metadata("design:type", UTMInput)
+], GuestOrderInput.prototype, "utm", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => String, { nullable: true }),
+    __metadata("design:type", String)
+], GuestOrderInput.prototype, "pageQuery", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => String, { nullable: true }),
+    __metadata("design:type", String)
+], GuestOrderInput.prototype, "referralCode", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => String, { nullable: true }),
+    __metadata("design:type", String)
+], GuestOrderInput.prototype, "promoterId", void 0);
+exports.GuestOrderInput = GuestOrderInput = __decorate([
+    (0, type_graphql_1.InputType)()
+], GuestOrderInput);

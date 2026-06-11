@@ -9,7 +9,7 @@ var __metadata = (this && this.__metadata) || function (k, v) {
     if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.ScannerEventSummary = exports.ScanTicketResponse = exports.ScannedOrderSummary = exports.ScannedExtraLine = exports.ScannedTicketLine = exports.ScannerRefreshResponse = exports.ScannerLoginResponse = exports.ScanResultStatus = void 0;
+exports.OfflineScanResult = exports.ScannerManifest = exports.ScannerManifestEntry = exports.ScannerEventSummary = exports.ScanTicketResponse = exports.ScannedOrderSummary = exports.ScannedExtraLine = exports.ScannedTicketLine = exports.ScannerRefreshResponse = exports.ScannerLoginResponse = exports.ScanResultStatus = void 0;
 const type_graphql_1 = require("type-graphql");
 var ScanResultStatus;
 (function (ScanResultStatus) {
@@ -192,3 +192,95 @@ __decorate([
 exports.ScannerEventSummary = ScannerEventSummary = __decorate([
     (0, type_graphql_1.ObjectType)()
 ], ScannerEventSummary);
+// AUDIT-016: offline manifest — one cached, scannable ticket.
+let ScannerManifestEntry = class ScannerManifestEntry {
+};
+exports.ScannerManifestEntry = ScannerManifestEntry;
+__decorate([
+    (0, type_graphql_1.Field)(() => type_graphql_1.ID),
+    __metadata("design:type", String)
+], ScannerManifestEntry.prototype, "orderId", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => String),
+    __metadata("design:type", String)
+], ScannerManifestEntry.prototype, "qrCodeData", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => String, { nullable: true }),
+    __metadata("design:type", String)
+], ScannerManifestEntry.prototype, "customerName", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => String, { nullable: true }),
+    __metadata("design:type", String)
+], ScannerManifestEntry.prototype, "customerPhone", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => [ScannedTicketLine]),
+    __metadata("design:type", Array)
+], ScannerManifestEntry.prototype, "tickets", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => type_graphql_1.Int),
+    __metadata("design:type", Number)
+], ScannerManifestEntry.prototype, "totalTickets", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => Boolean),
+    __metadata("design:type", Boolean)
+], ScannerManifestEntry.prototype, "checkedIn", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => Date, { nullable: true }),
+    __metadata("design:type", Date)
+], ScannerManifestEntry.prototype, "checkedInAt", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => Boolean),
+    __metadata("design:type", Boolean)
+], ScannerManifestEntry.prototype, "refunded", void 0);
+exports.ScannerManifestEntry = ScannerManifestEntry = __decorate([
+    (0, type_graphql_1.ObjectType)()
+], ScannerManifestEntry);
+let ScannerManifest = class ScannerManifest {
+};
+exports.ScannerManifest = ScannerManifest;
+__decorate([
+    (0, type_graphql_1.Field)(() => type_graphql_1.ID),
+    __metadata("design:type", String)
+], ScannerManifest.prototype, "eventId", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => String, { nullable: true }),
+    __metadata("design:type", String)
+], ScannerManifest.prototype, "title", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => Date, { nullable: true }),
+    __metadata("design:type", Date)
+], ScannerManifest.prototype, "startDate", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => Date, { nullable: true }),
+    __metadata("design:type", Date)
+], ScannerManifest.prototype, "endDate", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => Date),
+    __metadata("design:type", Date)
+], ScannerManifest.prototype, "generatedAt", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => [ScannerManifestEntry]),
+    __metadata("design:type", Array)
+], ScannerManifest.prototype, "entries", void 0);
+exports.ScannerManifest = ScannerManifest = __decorate([
+    (0, type_graphql_1.ObjectType)()
+], ScannerManifest);
+// AUDIT-016: per-item result of replaying a queued offline scan.
+let OfflineScanResult = class OfflineScanResult {
+};
+exports.OfflineScanResult = OfflineScanResult;
+__decorate([
+    (0, type_graphql_1.Field)(() => String),
+    __metadata("design:type", String)
+], OfflineScanResult.prototype, "qrCodeData", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => ScanResultStatus),
+    __metadata("design:type", String)
+], OfflineScanResult.prototype, "status", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => String),
+    __metadata("design:type", String)
+], OfflineScanResult.prototype, "message", void 0);
+exports.OfflineScanResult = OfflineScanResult = __decorate([
+    (0, type_graphql_1.ObjectType)()
+], OfflineScanResult);

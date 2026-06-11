@@ -13,6 +13,7 @@ import { Queue } from "bullmq";
 import crypto from "crypto";
 import { ErrorWithProps } from "mercurius";
 import { EnvVars } from "../../../utils/environment";
+import { signQrPayload } from "../../../utils/qr-hash";
 import { enqueueLifecycleEmail } from "../../../utils/lifecycle.queue";
 import { getRazorpayPayments } from "../../../utils/razorpay.client";
 import { RedisKeys, redisClient } from "../../../utils/redis";
@@ -27,6 +28,9 @@ import { PayoutModel } from "../../payout/schema/payout.schema";
 import { CreateOrderInput } from "../interfaces/order.input";
 import { RazorpayCheckoutPayload } from "../interfaces/order.objects";
 import { Order, OrderModel } from "../schema/order.schema";
+import { OfflineOrderModel } from "../schema/offline-order.schema";
+import { OfflineOrderMode } from "@hoizr-technology/shared";
+import { resolveCustomerForOrder } from "../../customer/service/customer-resolution.service";
 import { InvoiceModel } from "../schema/invoice.schema";
 import { generateSignedPdfUrl } from "../../../utils/cloudinary";
 import { InvoiceType } from "@hoizr-technology/shared";
@@ -173,11 +177,9 @@ class OrderService {
 
   private generateQrPayload(orderId: string, paymentId: string) {
     const payload = `hoizr:${orderId}:${paymentId}`;
-    const hash = crypto
-      .createHmac("sha256", EnvVars.values.ENCRYPTION_KEY)
-      .update(payload)
-      .digest("hex");
-    return { payload, hash };
+    // AUDIT-023: versioned signing — see utils/qr-hash.ts.
+    const { hash, version } = signQrPayload(payload);
+    return { payload, hash, version };
   }
 
   private assertCartReservationActive(reservedAt: string): Date {
@@ -519,6 +521,7 @@ class OrderService {
         order.razorpayPaymentId = paymentId;
         order.qrCodeData = qr.payload;
         order.qrCodeHash = qr.hash;
+        order.qrHashVersion = qr.version;
         await order.save({ session });
 
         const ticketOps = orderTickets.map((line: any) => ({
@@ -574,6 +577,433 @@ class OrderService {
       await this.dispatchOrderConfirmationComms(createdOrder);
     }
     return createdOrder as Order;
+  }
+
+  /**
+   * Guest checkout: a not-logged-in buyer places an order with just their
+   * contact details + selected tickets. Phone is the identity — if an
+   * account already exists we attach the order to it (and the client shows
+   * "we found your account"); otherwise we auto-create a PHONE account so the
+   * tickets live somewhere they can later log into. `guestInfo` is always
+   * stored so guest purchases are countable. Reuses the EXACT online order
+   * flow (seed cart → createOrder), so no money-path logic is duplicated.
+   */
+  async createGuestOrder(input: {
+    eventId: string;
+    tickets: { ticketId: string; quantity: number }[];
+    extras?: { extraId: string; quantity: number }[];
+    firstName: string;
+    lastName: string;
+    email: string;
+    phone: string;
+    notifyMe?: boolean;
+    offlineOrderId?: string;
+    utm?: any;
+    pageQuery?: string;
+    referralCode?: string;
+    promoterId?: string;
+  }): Promise<{
+    result: CreateOrderServiceResult;
+    accountFound: boolean;
+    accountEmail?: string;
+  }> {
+    if (!input.tickets?.length && !input.extras?.length) {
+      throw new ErrorWithProps("Select at least one ticket");
+    }
+
+    const resolved = await resolveCustomerForOrder({
+      phone: input.phone,
+      email: input.email,
+      firstName: input.firstName,
+      lastName: input.lastName,
+      createIfMissing: true,
+    });
+    if (!resolved.customerId) {
+      throw new ErrorWithProps(
+        "Couldn't start checkout — please check your name, email and phone."
+      );
+    }
+
+    // Marketing opt-in applies only to a freshly created account (don't flip
+    // an existing customer's preference from a guest purchase).
+    if (resolved.created && input.notifyMe !== false) {
+      await CustomerModel.updateOne(
+        { _id: resolved.customerId },
+        { $set: { emailMarketingOptIn: true, whatsappMarketingOptIn: true } }
+      );
+    }
+
+    // Seed the cart for this customer, then run the normal order flow.
+    await this.cart.setCart(resolved.customerId, {
+      eventId: input.eventId,
+      tickets: input.tickets,
+      extras: input.extras ?? [],
+    });
+
+    const result = await this.createOrder(resolved.customerId, {
+      eventId: input.eventId,
+      guestInfo: {
+        firstName: input.firstName,
+        lastName: input.lastName,
+        email: input.email,
+        phone: input.phone,
+      },
+      utm: input.utm,
+      pageQuery: input.pageQuery,
+      referralCode: input.referralCode,
+      promoterId: input.promoterId,
+    });
+
+    // Offline payment link → link the created order to its OfflineOrder
+    // exactly (no fuzzy matching). The OfflineOrder flips to PAID when the
+    // order finalises (post-purchase worker reads Order.offlineOrderId).
+    if (input.offlineOrderId && result.order?._id) {
+      await OrderModel.updateOne(
+        { _id: result.order._id },
+        {
+          $set: { offlineOrderId: input.offlineOrderId, source: "OFFLINE_LINK" },
+        }
+      );
+    }
+
+    return {
+      result,
+      accountFound: resolved.existed,
+      accountEmail: resolved.existed ? resolved.accountEmail : undefined,
+    };
+  }
+
+  /**
+   * Resolve a host's offline payment-link short code → prefill payload for the
+   * customer checkout (hoizr.com/t/<code>). Public; returns enough to render a
+   * locked, prefilled order. `alreadyPaid`/`expired` let the page show the
+   * right state instead of letting a stale link double-charge.
+   */
+  async resolveOfflinePaymentLink(shortCode: string) {
+    if (!shortCode || !/^[A-Za-z0-9_-]{4,40}$/.test(shortCode)) {
+      throw new ErrorWithProps("Invalid link");
+    }
+    const offline: any = await OfflineOrderModel.findOne({
+      shortCode,
+      mode: OfflineOrderMode.PAYMENT_LINK,
+      isDeleted: { $ne: true },
+    }).lean();
+    if (!offline) throw new ErrorWithProps("This link is no longer valid");
+
+    const event: any = await EventModel.findById(offline.eventId)
+      .select("title slug eventFlyer horizontalFlyer")
+      .lean();
+
+    const alreadyPaid =
+      offline.status === "PAID" || !!offline.linkedOrderId;
+    const expired =
+      !!offline.linkExpiresAt && new Date(offline.linkExpiresAt) < new Date();
+
+    return {
+      offlineOrderId: String(offline._id),
+      eventId: String(offline.eventId),
+      eventTitle: event?.title,
+      eventFlyer: event?.horizontalFlyer || event?.eventFlyer,
+      eventSlug: event?.slug,
+      lines: (offline.lines ?? []).map((l: any) => ({
+        itemId: l.itemId,
+        name: l.name,
+        quantity: l.quantity,
+        unitPrice: l.unitPrice,
+        isExtra: !!l.isExtra,
+      })),
+      amountTotal: offline.amountTotal ?? 0,
+      customerFirstName: offline.customerFirstName,
+      customerLastName: offline.customerLastName,
+      customerEmail: offline.customerEmail,
+      customerPhone: offline.customerPhone,
+      alreadyPaid,
+      expired,
+    };
+  }
+
+  /**
+   * Offline-ticket feature: create a real, scannable Order for a host-issued
+   * offline ticket. Called ONLY by the HMAC-authed internal route (the host
+   * isn't a customer, so main-server brokers it). Reuses the exact same
+   * pricing + inventory + QR + fan-out path as an online order, so accounting
+   * and the door experience are identical — just no Razorpay leg. Guest order
+   * (no customerId); links back via `OfflineOrder.issuedOrderId`. Idempotent.
+   */
+  async createIssuedOfflineOrder(
+    offlineOrderId: string
+  ): Promise<{ orderId: string }> {
+    if (!isAlphanumeric(offlineOrderId)) {
+      throw new ErrorWithProps("Invalid offline order id");
+    }
+    const offline: any = await OfflineOrderModel.findById(offlineOrderId).lean();
+    if (!offline) throw new ErrorWithProps("Offline order not found");
+    if (offline.mode !== OfflineOrderMode.ISSUED) {
+      throw new ErrorWithProps("Not an issued offline order");
+    }
+    if (offline.issuedOrderId) {
+      return { orderId: String(offline.issuedOrderId) }; // idempotent
+    }
+
+    const event: any = await EventModel.findById(offline.eventId).lean();
+    if (!event) throw new ErrorWithProps("Event not found");
+
+    const ticketMap = new Map(
+      (event.tickets ?? []).map((t: any) => [String(t._id), t])
+    );
+    const extraMap = new Map(
+      (event.extras ?? []).map((e: any) => [String(e._id), e])
+    );
+    const orderTickets: any[] = [];
+    const orderExtras: any[] = [];
+    for (const line of offline.lines ?? []) {
+      if (line.isExtra) {
+        const ref: any = extraMap.get(String(line.itemId));
+        if (!ref) throw new ErrorWithProps(`Add-on not available: ${line.name}`);
+        const available = Number(ref.quantity ?? 0) - Number(ref.sold ?? 0);
+        if (line.quantity > available) {
+          throw new ErrorWithProps(`${ref.name ?? line.name} is sold out`);
+        }
+        const unitPrice = Number(ref.price ?? line.unitPrice ?? 0);
+        orderExtras.push({
+          extraId: String(line.itemId),
+          extraName: String(ref.name ?? line.name),
+          quantity: line.quantity,
+          unitPrice,
+          totalPrice: +(unitPrice * line.quantity).toFixed(2),
+        });
+      } else {
+        const ref: any = ticketMap.get(String(line.itemId));
+        if (!ref) throw new ErrorWithProps(`Ticket not available: ${line.name}`);
+        const remaining =
+          Number(ref.ticketCapacity ?? 0) - Number(ref.ticketSold ?? 0);
+        if (line.quantity > remaining) {
+          throw new ErrorWithProps(`${ref.ticketName ?? line.name} is sold out`);
+        }
+        const unitPrice = Number(ref.ticketPrice ?? line.unitPrice ?? 0);
+        orderTickets.push({
+          ticketTypeId: String(line.itemId),
+          ticketName: String(ref.ticketName ?? line.name),
+          quantity: line.quantity,
+          unitPrice,
+          totalPrice: +(unitPrice * line.quantity).toFixed(2),
+        });
+      }
+    }
+    if (!orderTickets.length && !orderExtras.length) {
+      throw new ErrorWithProps("Offline order has no valid lines");
+    }
+
+    const ticketRefs = new Map<string, CartTicketRef>(
+      (event.tickets ?? []).map((t: any) => [
+        String(t._id),
+        { ticketGST: t.ticketGST, gstRate: t.gstRate },
+      ])
+    );
+    const [
+      applicationFeePercent,
+      applicationFeeGstPercent,
+      hoizrCommissionGstPercent,
+      host,
+    ] = await Promise.all([
+      getCachedConfigNumber(ConfigTypeEnum.platformFeeOnEvent, 5),
+      getCachedConfigNumber(ConfigTypeEnum.gstOnPlatformFeeOnEvent, 18),
+      getCachedConfigNumber(ConfigTypeEnum.gstOnComission, 18),
+      this.loadHostGstContextForEvent(event),
+    ]);
+    const pricing = this.cart.computePricingForLines(
+      orderTickets.map((t) => ({
+        ticketId: t.ticketTypeId,
+        quantity: t.quantity,
+        unitPrice: t.unitPrice,
+      })),
+      orderExtras.map((e) => ({ quantity: e.quantity, unitPrice: e.unitPrice })),
+      ticketRefs,
+      applicationFeePercent,
+      applicationFeeGstPercent,
+      host
+    );
+
+    const selectedPlan = event.pricingSnapshot;
+    const aiCommissionPct =
+      typeof event.aiSelectedCommissionPct === "number"
+        ? event.aiSelectedCommissionPct
+        : undefined;
+    let hoizrCommissionPercent: number;
+    if (typeof aiCommissionPct === "number") {
+      hoizrCommissionPercent = aiCommissionPct;
+    } else if (selectedPlan) {
+      hoizrCommissionPercent = Number(selectedPlan.commissionRate ?? 0);
+    } else {
+      throw new ErrorWithProps(
+        "Event is not priced: select a pricing plan before issuing tickets."
+      );
+    }
+    const aiBoostFeeRupees = Number(
+      event.aiSelectedExtraAmount ?? selectedPlan?.upfrontFee ?? 0
+    );
+    const aiBoostGstPercent = await getCachedConfigNumber(
+      ConfigTypeEnum.gstOnAiBoost,
+      18
+    );
+    const appliedConfigSnapshot = this.buildConfigSnapshot({
+      platformFeePercent: applicationFeePercent,
+      platformFeeGstPercent: applicationFeeGstPercent,
+      hoizrCommissionPercent,
+      hoizrCommissionGstPercent,
+      ticketGstPercent: pricing.taxesPercent,
+      host,
+      aiBoost:
+        aiBoostFeeRupees > 0
+          ? {
+              feeRupees: aiBoostFeeRupees,
+              gstPercent: aiBoostGstPercent,
+              adjustmentMode: event.feeSettlementMode,
+              offerId: event.selectedAiBoostGenerationId,
+            }
+          : undefined,
+    });
+
+    // If a customer already exists for this phone/email, attach the order to
+    // their account (don't auto-create for an offline issue — the buyer
+    // didn't opt in). guestInfo is always recorded too.
+    const resolved = await resolveCustomerForOrder({
+      phone: offline.customerPhone,
+      email: offline.customerEmail,
+      createIfMissing: false,
+    });
+
+    const session = await mongoose.startSession();
+    let createdOrder: any = null;
+    try {
+      await session.withTransaction(async () => {
+        const latestEvent = await EventModel.findById(event._id)
+          .select("tickets extras")
+          .session(session)
+          .lean();
+        if (!latestEvent) throw new ErrorWithProps("Event not available");
+        const lt = new Map(
+          (latestEvent.tickets ?? []).map((t: any) => [String(t._id), t])
+        );
+        for (const line of orderTickets) {
+          const t: any = lt.get(line.ticketTypeId);
+          if (
+            !t ||
+            Number(t.ticketSold ?? 0) + line.quantity >
+              Number(t.ticketCapacity ?? 0)
+          ) {
+            throw new ErrorWithProps(`${line.ticketName} is sold out`);
+          }
+        }
+        const le = new Map(
+          (latestEvent.extras ?? []).map((e: any) => [String(e._id), e])
+        );
+        for (const line of orderExtras) {
+          const e: any = le.get(line.extraId);
+          if (
+            !e ||
+            Number(e.sold ?? 0) + line.quantity > Number(e.quantity ?? 0)
+          ) {
+            throw new ErrorWithProps(`${line.extraName} is sold out`);
+          }
+        }
+
+        const order = new OrderModel({
+          customerId: resolved.customerId,
+          guestInfo: {
+            firstName: offline.customerFirstName,
+            lastName: offline.customerLastName,
+            email: offline.customerEmail,
+            phone: offline.customerPhone,
+          },
+          eventId: String(event._id),
+          businessId: event.hostId,
+          tickets: orderTickets,
+          extras: orderExtras,
+          subtotal: pricing.grossAmount,
+          platformFee: pricing.applicationFee,
+          platformFeeGst: pricing.platformFeeGst,
+          totalAmount: pricing.totalAmount,
+          applicationFeePercent: pricing.applicationFeePercent,
+          taxes: pricing.taxes,
+          taxesPercent: pricing.taxesPercent,
+          hoizrCommission: 0,
+          hoizrCommissionPercent,
+          razorpayFee: 0,
+          finalDeclaredCommission: 0,
+          finalDeclaredOfferAmount: 0,
+          appliedConfigSnapshot,
+          orderStatus: OrderStatus.PAYMENT_SUCCESS,
+          reservedAt: new Date(),
+          source: "OFFLINE_ISSUED",
+          offlineOrderId: String(offline._id),
+        });
+        const paymentId = `offline_${order._id.toString()}`;
+        const qr = this.generateQrPayload(order._id.toString(), paymentId);
+        order.razorpayPaymentId = paymentId;
+        order.qrCodeData = qr.payload;
+        order.qrCodeHash = qr.hash;
+        order.qrHashVersion = qr.version;
+        await order.save({ session });
+
+        const ticketOps = orderTickets.map((line: any) => ({
+          updateOne: {
+            filter: { _id: event._id, "tickets._id": line.ticketTypeId },
+            update: { $inc: { "tickets.$.ticketSold": line.quantity } },
+          },
+        }));
+        const extraOps = orderExtras.map((line: any) => ({
+          updateOne: {
+            filter: { _id: event._id, "extras._id": line.extraId },
+            update: { $inc: { "extras.$.sold": line.quantity } },
+          },
+        }));
+        if (ticketOps.length || extraOps.length) {
+          await EventModel.bulkWrite([...ticketOps, ...extraOps], { session });
+        }
+
+        const now = new Date();
+        await EventModel.updateOne(
+          { _id: event._id, firstSaleAt: { $exists: false } },
+          { $set: { firstSaleAt: now } },
+          { session }
+        );
+        await EventModel.updateOne(
+          { _id: event._id },
+          { $set: { lastSaleAt: now } },
+          { session }
+        );
+
+        // Claim the offline order → this order. The {issuedOrderId:$exists:false}
+        // guard makes a concurrent retry abort (modifiedCount 0 → throw →
+        // rollback) so we never double-issue.
+        const claim = await OfflineOrderModel.updateOne(
+          { _id: offline._id, issuedOrderId: { $exists: false } },
+          { $set: { issuedOrderId: String(order._id) } },
+          { session }
+        );
+        if (claim.modifiedCount !== 1) {
+          throw new ErrorWithProps(
+            "This offline order was already issued."
+          );
+        }
+
+        createdOrder = order.toObject();
+      });
+    } finally {
+      await session.endSession();
+    }
+
+    if (createdOrder?._id) {
+      await postPurchaseQueue.add("APPLY_FOLLOWS_AND_SALES_LOG", {
+        orderId: createdOrder._id.toString(),
+      });
+      await soldOutTriggerQueue.add("CHECK_AFTER_SALE", {
+        eventId: String(event._id),
+      });
+      await this.dispatchOrderConfirmationComms(createdOrder);
+    }
+    return { orderId: String(createdOrder._id) };
   }
 
   private async dispatchOrderConfirmationComms(order: any): Promise<void> {
@@ -1245,17 +1675,16 @@ class OrderService {
         }
 
         const qrPayload = `hoizr:${order._id.toString()}:${razorpayPaymentId}`;
-        const qrHash = crypto
-          .createHmac("sha256", EnvVars.values.ENCRYPTION_KEY)
-          .update(qrPayload)
-          .digest("hex");
+        // AUDIT-023: versioned signing — see utils/qr-hash.ts.
+        const qrSigned = signQrPayload(qrPayload);
 
         order.orderStatus = OrderStatus.PAYMENT_SUCCESS;
         order.razorpayPaymentId = razorpayPaymentId;
         order.razorpaySignature = razorpaySignature;
         order.razorpayFee = razorpayFee;
         order.qrCodeData = qrPayload;
-        order.qrCodeHash = qrHash;
+        order.qrCodeHash = qrSigned.hash;
+        order.qrHashVersion = qrSigned.version;
         await order.save({ session });
 
         const ticketOps = (order.tickets ?? []).map((line: any) => ({

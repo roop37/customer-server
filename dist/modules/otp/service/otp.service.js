@@ -10,6 +10,7 @@ const node_crypto_1 = require("node:crypto");
 const sms_queue_1 = require("../../../sms/sms.queue");
 const crypt_1 = require("../../../utils/crypt");
 const environment_1 = require("../../../utils/environment");
+const primary_whatsapp_queue_1 = require("../../../utils/primary-whatsapp.queue");
 const otp_schema_1 = require("../schema/otp.schema");
 const OTP_LENGTH = 6;
 class OtpService {
@@ -28,6 +29,18 @@ class OtpService {
             const message = login
                 ? `Your Hoizr login code is ${otp}. Valid for 5 minutes.`
                 : `Welcome to Hoizr! Your verification code is ${otp}. Valid for 5 minutes.`;
+            // WhatsApp is the PRIMARY OTP channel (Meta Cloud API, Hoizr's WABA);
+            // in dev / without keys the worker console-logs the send. SMS is
+            // retained as a parallel fallback during rollout so OTP is never
+            // undelivered while the WhatsApp auth template clears Meta review —
+            // once WhatsApp delivery is proven in prod this becomes
+            // failure-triggered only. `phone` is already canonical E.164.
+            try {
+                await (0, primary_whatsapp_queue_1.enqueueWhatsAppOtp)(phone, otp);
+            }
+            catch {
+                // never let a WhatsApp enqueue failure block the SMS fallback
+            }
             await sms_queue_1.smsQueue.add(login ? "CUSTOMER_LOGIN_OTP" : "CUSTOMER_REGISTER_OTP", {
                 phoneNumber: phone,
                 message,

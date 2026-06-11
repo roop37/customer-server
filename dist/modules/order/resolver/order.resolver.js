@@ -34,6 +34,25 @@ let OrderResolver = class OrderResolver {
         };
     }
     /**
+     * Guest checkout — PUBLIC (no customer auth). The buyer submits selected
+     * tickets + contact details from the "Continue to checkout" modal. We
+     * resolve/create the customer by phone and run the normal order flow.
+     * (Rate-limit at the gateway/middleware level; value is gated by Razorpay.)
+     */
+    /** Resolve a host's offline payment link → prefill for the checkout page. */
+    async offlinePaymentLink(shortCode) {
+        return this.service.resolveOfflinePaymentLink(shortCode);
+    }
+    async createGuestOrder(input) {
+        const { result, accountFound, accountEmail } = await this.service.createGuestOrder(input);
+        return {
+            order: (0, order_view_1.toCustomerOrderView)(result.order),
+            checkout: result.checkout,
+            accountFound,
+            accountEmail,
+        };
+    }
+    /**
      * AUDIT-030: lets the checkout client resume a PaymentPending order
      * the customer abandoned mid-Razorpay-popup, without minting a fresh
      * Razorpay order each time (which would risk a double-capture).
@@ -75,6 +94,20 @@ __decorate([
     __metadata("design:paramtypes", [Object, order_input_1.CreateOrderInput]),
     __metadata("design:returntype", Promise)
 ], OrderResolver.prototype, "createOrder", null);
+__decorate([
+    (0, type_graphql_1.Query)(() => order_objects_1.OfflinePaymentLinkView),
+    __param(0, (0, type_graphql_1.Arg)("shortCode")),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [String]),
+    __metadata("design:returntype", Promise)
+], OrderResolver.prototype, "offlinePaymentLink", null);
+__decorate([
+    (0, type_graphql_1.Mutation)(() => order_objects_1.GuestCheckoutResponse),
+    __param(0, (0, type_graphql_1.Arg)("input")),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [order_input_1.GuestOrderInput]),
+    __metadata("design:returntype", Promise)
+], OrderResolver.prototype, "createGuestOrder", null);
 __decorate([
     (0, type_graphql_1.Mutation)(() => order_objects_1.CreateOrderResponse),
     (0, type_graphql_1.UseMiddleware)(customer_auth_1.isCustomerAuthenticated),

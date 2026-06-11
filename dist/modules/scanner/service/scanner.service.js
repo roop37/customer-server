@@ -7,7 +7,7 @@ const shared_1 = require("@hoizr-technology/shared");
 const bcrypt_1 = require("bcrypt");
 const crypto_1 = __importDefault(require("crypto"));
 const mercurius_1 = require("mercurius");
-const environment_1 = require("../../../utils/environment");
+const qr_hash_1 = require("../../../utils/qr-hash");
 const jwt_1 = require("../../../utils/jwt");
 const rateLimit_1 = require("../../../utils/rateLimit");
 const validations_1 = require("../../../utils/validations");
@@ -44,6 +44,14 @@ class ScannerService {
             throw new mercurius_1.ErrorWithProps("Invalid email or access code");
         }
         await (0, rateLimit_1.resetRateLimit)(rlKey);
+        // AUDIT-024: codes expire 24h after the event ends (set at create/
+        // regenerate in main-server). Expired ≠ wrong, so say so — the host
+        // fixes it by regenerating the code. Scanners created before the
+        // expiry field shipped have no expiresAt and keep working.
+        if (scanner.accessCodeExpiresAt &&
+            new Date(scanner.accessCodeExpiresAt) < new Date()) {
+            throw new mercurius_1.ErrorWithProps("This access code has expired. Ask the organizer to regenerate it.");
+        }
         // Ensure the event is not over (give 24h grace after endDate for late
         // check-ins / disputes).
         const event = await event_schema_1.EventModel.findOne({
@@ -147,17 +155,17 @@ class ScannerService {
             return null;
         return { orderId, paymentId };
     }
-    verifyQrHash(qrPayload, storedHash) {
-        const expected = crypto_1.default
-            .createHmac("sha256", environment_1.EnvVars.values.ENCRYPTION_KEY)
-            .update(qrPayload)
-            .digest("hex");
-        // Constant-time comparison to mitigate timing attacks
-        if (expected.length !== storedHash.length)
-            return false;
-        return crypto_1.default.timingSafeEqual(Buffer.from(expected, "hex"), Buffer.from(storedHash, "hex"));
+    verifyQrHash(qrPayload, storedHash, qrHashVersion) {
+        // AUDIT-023: pick the HMAC key by the version the ticket was signed
+        // with (utils/qr-hash.ts) so key rotation can't invalidate live
+        // tickets. Constant-time comparison inside.
+        return (0, qr_hash_1.verifyQrHashVersioned)(qrPayload, storedHash, qrHashVersion);
     }
-    async scanTicket(input, ctx) {
+    async scanTicket(input, ctx, 
+    // AUDIT-016: when replaying an OFFLINE scan, evaluate the ticket as of
+    // when it was actually scanned (so the door-window checks + check-in
+    // timestamp reflect the real moment, not the later sync time).
+    asOf = new Date()) {
         if (!ctx.scannerId || !ctx.scannerEventId) {
             return {
                 status: scanner_objects_1.ScanResultStatus.SCANNER_INACTIVE,
@@ -191,7 +199,7 @@ class ScannerService {
                 message: "Event has been cancelled — entry is no longer valid",
             };
         }
-        const now = new Date();
+        const now = asOf;
         // AUDIT-011: refuse scans more than 2h before doors open. The
         // 2-hour grace covers staff testing scanners at setup time without
         // accidentally admitting attendees too early.
@@ -303,7 +311,7 @@ class ScannerService {
         // Defense-in-depth HMAC verify BEFORE the database claim — a
         // tampered QR never gets a chance to flip the order's status.
         if (existing.qrCodeHash &&
-            !this.verifyQrHash(input.qrCodeData, existing.qrCodeHash)) {
+            !this.verifyQrHash(input.qrCodeData, existing.qrCodeHash, existing.qrHashVersion)) {
             return {
                 status: scanner_objects_1.ScanResultStatus.INVALID_QR,
                 message: "QR code signature is invalid",
@@ -379,6 +387,101 @@ class ScannerService {
                 checkedInAt: now,
             },
         };
+    }
+    /**
+     * AUDIT-016: offline manifest. The scanner downloads every valid ticket
+     * for its event on login + stores it locally, so it can validate QR codes
+     * and admit guests with NO network. Returns the QR payload (to match
+     * against the scanned code), the customer/ticket details to display, and
+     * the current check-in state (so the cache starts in sync).
+     *
+     * Refunded orders are included (still scannable per the product rule); the
+     * client surfaces the refunded flag. The QR HMAC isn't verifiable offline
+     * (server-only secret) — the manifest IS the trust anchor: a forged QR
+     * whose orderId isn't in the manifest is rejected by the client.
+     */
+    async getEventManifest(ctx) {
+        if (!ctx.scannerId || !ctx.scannerEventId) {
+            throw new mercurius_1.ErrorWithProps("Scanner session is not valid");
+        }
+        const event = await event_schema_1.EventModel.findOne({
+            _id: ctx.scannerEventId,
+            isDeleted: false,
+        })
+            .select("title startDate endDate status")
+            .lean();
+        if (!event)
+            throw new mercurius_1.ErrorWithProps("Event not found");
+        const orders = await order_schema_1.OrderModel.find({
+            eventId: ctx.scannerEventId,
+            isDeleted: false,
+            orderStatus: {
+                $in: [
+                    shared_1.OrderStatus.PAYMENT_SUCCESS,
+                    shared_1.OrderStatus.CHECKED_IN,
+                    shared_1.OrderStatus.REFUNDED,
+                ],
+            },
+            qrCodeData: { $exists: true, $ne: null },
+        })
+            .select("qrCodeData orderStatus checkedIn checkedInAt guestInfo tickets extras")
+            .lean();
+        const entries = orders.map((o) => ({
+            orderId: String(o._id),
+            qrCodeData: o.qrCodeData,
+            customerName: [o.guestInfo?.firstName, o.guestInfo?.lastName]
+                .filter(Boolean)
+                .join(" ") || undefined,
+            customerPhone: o.guestInfo?.phone ?? undefined,
+            tickets: (o.tickets ?? []).map((t) => ({
+                ticketName: t.ticketName,
+                quantity: Number(t.quantity ?? 0),
+            })),
+            totalTickets: (o.tickets ?? []).reduce((sum, t) => sum + Number(t.quantity ?? 0), 0),
+            checkedIn: !!o.checkedIn || o.orderStatus === shared_1.OrderStatus.CHECKED_IN,
+            checkedInAt: o.checkedInAt ?? undefined,
+            refunded: o.orderStatus === shared_1.OrderStatus.REFUNDED,
+        }));
+        return {
+            eventId: String(event._id),
+            title: event.title,
+            startDate: event.startDate,
+            endDate: event.endDate,
+            generatedAt: new Date(),
+            entries,
+        };
+    }
+    /**
+     * AUDIT-016: replay queued offline check-ins. Each item is run through the
+     * normal scanTicket logic (atomic claim, all the same gates) but evaluated
+     * "as of" the offline scan time, so the server stays the source of truth
+     * and conflicts (already checked in by another door) come back per-item.
+     * Idempotent: re-syncing an already-applied scan returns ALREADY_CHECKED_IN.
+     */
+    async syncOfflineScans(scans, ctx) {
+        if (!ctx.scannerId || !ctx.scannerEventId) {
+            throw new mercurius_1.ErrorWithProps("Scanner session is not valid");
+        }
+        const results = [];
+        for (const scan of scans ?? []) {
+            const asOf = scan.scannedAt ? new Date(scan.scannedAt) : new Date();
+            try {
+                const res = await this.scanTicket({ qrCodeData: scan.qrCodeData }, ctx, Number.isNaN(asOf.getTime()) ? new Date() : asOf);
+                results.push({
+                    qrCodeData: scan.qrCodeData,
+                    status: res.status,
+                    message: res.message,
+                });
+            }
+            catch (err) {
+                results.push({
+                    qrCodeData: scan.qrCodeData,
+                    status: scanner_objects_1.ScanResultStatus.INVALID_QR,
+                    message: err?.message ?? "Sync failed",
+                });
+            }
+        }
+        return results;
     }
 }
 exports.default = ScannerService;

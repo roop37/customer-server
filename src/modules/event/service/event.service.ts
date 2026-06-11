@@ -27,7 +27,9 @@ class PublicEventService {
     const visibilityFilter = {
       isDeleted: false,
       isVisible: true,
-      status: EventStatus.PUBLISHED,
+      // AUDIT-065: completed events must still RENDER (detail pages, past-event
+      // buckets) — only PURCHASE gates (cart/order) stay PUBLISHED-only.
+      status: { $in: [EventStatus.PUBLISHED, EventStatus.COMPLETED] },
       adminPaused: { $ne: true },
     } as const;
 
@@ -60,7 +62,9 @@ class PublicEventService {
       _id: id,
       isDeleted: false,
       isVisible: true,
-      status: EventStatus.PUBLISHED,
+      // AUDIT-065: completed events must still RENDER (detail pages, past-event
+      // buckets) — only PURCHASE gates (cart/order) stay PUBLISHED-only.
+      status: { $in: [EventStatus.PUBLISHED, EventStatus.COMPLETED] },
       adminPaused: { $ne: true },
     }).lean<Event>();
 
@@ -162,7 +166,9 @@ class PublicEventService {
       _id: eventId,
       isDeleted: false,
       isVisible: true,
-      status: EventStatus.PUBLISHED,
+      // AUDIT-065: completed events must still RENDER (detail pages, past-event
+      // buckets) — only PURCHASE gates (cart/order) stay PUBLISHED-only.
+      status: { $in: [EventStatus.PUBLISHED, EventStatus.COMPLETED] },
       adminPaused: { $ne: true },
     }).lean<Event>();
 
@@ -319,7 +325,9 @@ class PublicEventService {
     const baseFilter = {
       isDeleted: false,
       isVisible: true,
-      status: EventStatus.PUBLISHED,
+      // AUDIT-065: completed events must still RENDER (detail pages, past-event
+      // buckets) — only PURCHASE gates (cart/order) stay PUBLISHED-only.
+      status: { $in: [EventStatus.PUBLISHED, EventStatus.COMPLETED] },
       adminPaused: { $ne: true },
       // Match either a real Artist (lineup.artistLinkId) or a phantom
       // (lineup.tempArtistId) so the modal works for both kinds.
@@ -373,7 +381,9 @@ class PublicEventService {
     const baseFilter = {
       isDeleted: false,
       isVisible: true,
-      status: EventStatus.PUBLISHED,
+      // AUDIT-065: completed events must still RENDER (detail pages, past-event
+      // buckets) — only PURCHASE gates (cart/order) stay PUBLISHED-only.
+      status: { $in: [EventStatus.PUBLISHED, EventStatus.COMPLETED] },
       adminPaused: { $ne: true },
       $or: [
         { hostId },

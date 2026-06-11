@@ -3,11 +3,14 @@ import { isCustomerAuthenticated } from "../../../middlewares/customer-auth";
 import Context from "../../../types/context.type";
 import {
   CreateOrderInput,
+  GuestOrderInput,
   MyOrdersFilterInput,
 } from "../interfaces/order.input";
 import {
   CreateOrderResponse,
   CustomerOrderInvoice,
+  GuestCheckoutResponse,
+  OfflinePaymentLinkView,
 } from "../interfaces/order.objects";
 import { CustomerOrderView, toCustomerOrderView } from "../interfaces/order.view";
 import OrderService from "../service/order.service";
@@ -26,6 +29,34 @@ export class OrderResolver {
     return {
       order: toCustomerOrderView(result.order),
       checkout: result.checkout,
+    };
+  }
+
+  /**
+   * Guest checkout — PUBLIC (no customer auth). The buyer submits selected
+   * tickets + contact details from the "Continue to checkout" modal. We
+   * resolve/create the customer by phone and run the normal order flow.
+   * (Rate-limit at the gateway/middleware level; value is gated by Razorpay.)
+   */
+  /** Resolve a host's offline payment link → prefill for the checkout page. */
+  @Query(() => OfflinePaymentLinkView)
+  async offlinePaymentLink(
+    @Arg("shortCode") shortCode: string
+  ): Promise<OfflinePaymentLinkView> {
+    return this.service.resolveOfflinePaymentLink(shortCode) as any;
+  }
+
+  @Mutation(() => GuestCheckoutResponse)
+  async createGuestOrder(
+    @Arg("input") input: GuestOrderInput
+  ): Promise<GuestCheckoutResponse> {
+    const { result, accountFound, accountEmail } =
+      await this.service.createGuestOrder(input);
+    return {
+      order: toCustomerOrderView(result.order),
+      checkout: result.checkout,
+      accountFound,
+      accountEmail,
     };
   }
 
