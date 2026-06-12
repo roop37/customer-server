@@ -1,4 +1,5 @@
 import { Field, ObjectType } from "type-graphql";
+import { CartPricing } from "../../cart/interfaces/cart.objects";
 import { CustomerOrderView } from "./order.view";
 
 @ObjectType()
@@ -87,6 +88,76 @@ export class OfflinePaymentLinkView {
 
   @Field(() => Boolean)
   expired: boolean;
+}
+
+/**
+ * Result of validating a promo code at checkout (previewCoupon query).
+ * `ok=false` carries a human `reason`; `ok=true` carries the discount and
+ * the grand-total before/after so the UI can show the savings line without
+ * re-deriving the pricing math (which lives server-side).
+ */
+@ObjectType()
+export class CouponPreviewView {
+  @Field(() => Boolean)
+  ok: boolean;
+
+  @Field(() => String)
+  code: string;
+
+  /** Failure message when ok=false (e.g. "This coupon has expired"). */
+  @Field(() => String, { nullable: true })
+  reason?: string;
+
+  /** Discount applied to the ticket subtotal, in rupees. */
+  @Field(() => Number)
+  discountAmount: number;
+
+  /** Ticket subtotal BEFORE discount (gross), in rupees. */
+  @Field(() => Number)
+  ticketsSubtotal: number;
+
+  /** Grand total without the coupon, in rupees. */
+  @Field(() => Number)
+  totalBefore: number;
+
+  /** Grand total with the coupon applied, in rupees. */
+  @Field(() => Number)
+  totalAfter: number;
+
+  /**
+   * Full DISCOUNTED pricing breakdown (only when ok=true) so the checkout
+   * UI renders exact GST/fee lines on the post-discount base — `grossAmount`
+   * here is the net taxable, and `ticketsSubtotal − discountAmount` reconciles
+   * to it. Null when the code is invalid.
+   */
+  @Field(() => CartPricing, { nullable: true })
+  pricing?: CartPricing;
+}
+
+/**
+ * A coupon the host chose to display publicly on the event page
+ * (`showToCustomers`). Read-only marketing surface — customers copy the
+ * `code` and apply it at checkout. Only active, in-window codes scoped to
+ * this event (or host-global) are returned.
+ */
+@ObjectType()
+export class PublicCoupon {
+  @Field(() => String)
+  code: string;
+
+  @Field(() => String, { nullable: true })
+  description?: string;
+
+  /** Human discount label, e.g. "25% OFF (up to ₹200)", "₹100 OFF", "FREE". */
+  @Field(() => String)
+  discountLabel: string;
+
+  /** Minimum cart value to use the code (₹), when set. */
+  @Field(() => Number, { nullable: true })
+  minCartValue?: number;
+
+  @Field(() => Date)
+  endDate: Date;
 }
 
 @ObjectType()

@@ -89,6 +89,12 @@ export type CartPricingInput = {
    * ticket GST is suppressed regardless of what individual tickets say.
    */
   host?: CartHostGstContext | null;
+  /**
+   * Coupon discount to take off the TICKET subtotal, in paise, BEFORE GST/fees
+   * (CGST §15(3)(a); see HOIZR_FINANCE_SOURCE_OF_TRUTH.md). Apportioned across
+   * ticket lines so per-line GST reduces correctly. Omit/0 ⇒ no discount.
+   */
+  couponDiscountPaise?: number;
 };
 
 // rupees → integer paise (nearest paise; handles any fractional input).
@@ -104,31 +110,64 @@ const pctOfPaise = (paise: number, percent: number): number =>
 export const computeCartPricingForLines = (
   input: CartPricingInput
 ): CartPricing => {
-  const ticketsGrossPaise = input.ticketLines.reduce(
-    (sum, l) => sum + toPaise(l.unitPrice) * Math.max(0, Math.trunc(l.quantity)),
-    0
+  const ticketLineGrossPaise = input.ticketLines.map(
+    (l) => toPaise(l.unitPrice) * Math.max(0, Math.trunc(l.quantity))
   );
+  const ticketsGrossPaise = ticketLineGrossPaise.reduce((a, b) => a + b, 0);
   const extrasGrossPaise = input.extraLines.reduce(
     (sum, l) => sum + toPaise(l.unitPrice) * Math.max(0, Math.trunc(l.quantity)),
     0
   );
 
-  // Ticket TAXABLE value = sum of ticket face values + extras. Base for BOTH
+  // Coupon discount reduces the TICKET subtotal BEFORE GST/fees. Clamp to the
+  // ticket gross, then apportion across ticket lines proportionally so each
+  // line's GST reduces correctly (mixed-rate-safe). Leftover from rounding /
+  // per-line clamping is redistributed onto lines that still have room.
+  const discountPaise = Math.min(
+    Math.max(0, Math.round(input.couponDiscountPaise ?? 0)),
+    ticketsGrossPaise
+  );
+  const lineDiscountPaise = new Array(ticketLineGrossPaise.length).fill(0);
+  if (discountPaise > 0 && ticketsGrossPaise > 0) {
+    let allocated = 0;
+    for (let i = 0; i < ticketLineGrossPaise.length; i++) {
+      const share = Math.min(
+        ticketLineGrossPaise[i],
+        Math.round(
+          (discountPaise * ticketLineGrossPaise[i]) / ticketsGrossPaise
+        )
+      );
+      lineDiscountPaise[i] = share;
+      allocated += share;
+    }
+    let leftover = discountPaise - allocated;
+    for (let i = 0; leftover > 0 && i < ticketLineGrossPaise.length; i++) {
+      const room = ticketLineGrossPaise[i] - lineDiscountPaise[i];
+      const add = Math.min(room, leftover);
+      lineDiscountPaise[i] += add;
+      leftover -= add;
+    }
+  }
+  const ticketLineNetPaise = ticketLineGrossPaise.map(
+    (g, i) => g - lineDiscountPaise[i]
+  );
+
+  // Ticket TAXABLE value = (discounted) ticket lines + extras. Base for BOTH
   // the customer-facing platform fee AND the host-side commission. Ticket
   // GST sits ABOVE this and is pass-through to the host.
-  const taxablePaise = ticketsGrossPaise + extrasGrossPaise;
+  const taxablePaise =
+    ticketLineNetPaise.reduce((a, b) => a + b, 0) + extrasGrossPaise;
 
-  // Ticket GST only when the host is GST-eligible. Rounded PER LINE.
+  // Ticket GST only when the host is GST-eligible. Rounded PER LINE, on the
+  // post-discount line taxable.
   const eligibleForTicketGst = canHostCollectTicketGst(input.host);
   const taxesPaise = eligibleForTicketGst
-    ? input.ticketLines.reduce((sum, l) => {
+    ? input.ticketLines.reduce((sum, l, i) => {
         if (!l.ticketId) return sum;
         const ref = input.ticketRefs.get(l.ticketId);
         if (!ref) return sum;
         const rate = resolveGstRateForTicket(ref);
-        const lineTaxablePaise =
-          toPaise(l.unitPrice) * Math.max(0, Math.trunc(l.quantity));
-        return sum + pctOfPaise(lineTaxablePaise, rate);
+        return sum + pctOfPaise(ticketLineNetPaise[i], rate);
       }, 0)
     : 0;
 
@@ -174,6 +213,7 @@ export const computeCartPricingForLines = (
 
   return {
     grossAmount: toRupees(taxablePaise),
+    discountAmount: toRupees(discountPaise),
     applicationFee: toRupees(applicationFeePaise),
     applicationFeePercent: input.applicationFeePercent,
     platformFeeGst: toRupees(platformFeeGstPaise),

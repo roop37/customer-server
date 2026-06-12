@@ -1,14 +1,18 @@
 import {
   ConfigTypeEnum,
+  Coupon,
   EventStatus,
   LifecycleEmailType,
   LifecycleSmsType,
+  OrderDiscountType,
   OrderStatus,
+  PromoDiscountType,
   QueueNames,
   VerificationStatus,
 } from "@hoizr-technology/shared";
 import { getCachedConfigNumber } from "../../../utils/configs-cache";
-import { mongoose } from "@typegoose/typegoose";
+import { getModelForClass, mongoose } from "@typegoose/typegoose";
+import { evaluateCoupon } from "./coupon-eval";
 import { Queue } from "bullmq";
 import crypto from "crypto";
 import { ErrorWithProps } from "mercurius";
@@ -44,6 +48,12 @@ type CreateOrderServiceResult = {
   order: Order;
   checkout?: RazorpayCheckoutPayload;
 };
+
+// Same `coupons` collection main-server writes — customer-server reads it to
+// validate/redeem at checkout (Coupon class is shared).
+const CouponModel = getModelForClass(Coupon, {
+  schemaOptions: { timestamps: true, collection: "coupons" },
+});
 
 const postPurchaseQueue = new Queue(QueueNames.postPurchaseQueue, {
   connection: redisClient,
@@ -432,6 +442,380 @@ class OrderService {
     );
   }
 
+  /**
+   * Resolve + validate a coupon for an order being created. Throws a clear
+   * message if a code was supplied but can't be applied (so the customer never
+   * silently pays full price after expecting a discount). Returns null when no
+   * code was given.
+   */
+  private async resolveCouponForOrder(
+    event: any,
+    couponCode: string | undefined,
+    orderTickets: any[],
+    customerId: string | undefined
+  ): Promise<{ couponDiscountPaise: number; coupon: any } | null> {
+    if (!couponCode?.trim()) return null;
+    const code = couponCode.trim().toUpperCase();
+    const coupon = await CouponModel.findOne({
+      host: String(event.hostId),
+      code,
+    }).lean<any>();
+    if (!coupon)
+      throw new ErrorWithProps("That promo code isn't valid for this event");
+    // Event-scoped coupon (coupon.eventId set) is valid only for that event;
+    // a global host promo (no eventId) works for any of the host's events.
+    if (coupon.eventId && String(coupon.eventId) !== String(event._id))
+      throw new ErrorWithProps("That promo code isn't valid for this event");
+
+    const ticketLines = orderTickets.map((t) => ({
+      ticketId: t.ticketTypeId,
+      grossPaise:
+        Math.round(Number(t.unitPrice) * 100) *
+        Math.max(0, Math.trunc(t.quantity)),
+    }));
+    const usage: any[] = Array.isArray(coupon.usage) ? coupon.usage : [];
+    const customerUsageCount = customerId
+      ? usage.filter((u) => String(u.customer) === String(customerId)).length
+      : 0;
+    let isFirstSignedOrder: boolean | undefined;
+    if (coupon.couponUsageType === "FirstSignedOrder" && customerId) {
+      const prior = await OrderModel.countDocuments({
+        customerId,
+        orderStatus: {
+          $in: [OrderStatus.PAYMENT_SUCCESS, OrderStatus.CHECKED_IN],
+        },
+      });
+      isFirstSignedOrder = prior === 0;
+    }
+    const res = evaluateCoupon(coupon, {
+      ticketLines,
+      totalUsageCount: usage.length,
+      customerUsageCount,
+      isFirstSignedOrder,
+    });
+    if (!res.ok)
+      throw new ErrorWithProps(res.reason ?? "This coupon can't be applied");
+    return { couponDiscountPaise: res.discountPaise, coupon };
+  }
+
+  /** Frozen order snapshot for a redeemed coupon (PROMO discount). */
+  private buildCouponSnapshot(coupon: any, discountAmount: number) {
+    return {
+      discountType: OrderDiscountType.PROMO,
+      discountAmount,
+      promoData: {
+        couponId: String(coupon._id),
+        code: coupon.code,
+        discountType: coupon.promoCodeDiscountType,
+        discountValue: coupon.discountValue,
+        uptoAmount: coupon.uptoAmount,
+        discountAmount,
+      },
+    };
+  }
+
+  /**
+   * Idempotently record a coupon redemption once an order is CONFIRMED, and
+   * auto-deactivate the coupon when its overall usage count or sales limit is
+   * reached. Never throws — coupon bookkeeping must not break a paid order.
+   */
+  private async recordCouponRedemption(order: any): Promise<void> {
+    const promo = order?.appliedDiscount?.promoData;
+    if (!promo?.couponId) return;
+    const orderId = String(order._id);
+    const saleAmount = Number(order.subtotal ?? 0);
+    try {
+      await CouponModel.updateOne(
+        { _id: promo.couponId, "usage.orderId": { $ne: orderId } },
+        {
+          $push: {
+            usage: {
+              customer: order.customerId
+                ? String(order.customerId)
+                : undefined,
+              orderId,
+              email: order.guestInfo?.email,
+              phone: order.guestInfo?.phone,
+              name:
+                [order.guestInfo?.firstName, order.guestInfo?.lastName]
+                  .filter(Boolean)
+                  .join(" ") || undefined,
+              discountApplied: Number(order.discountAmount ?? 0),
+              saleAmount,
+              usedAt: new Date(),
+            },
+          },
+          $inc: { totalSalesUsed: saleAmount },
+        }
+      );
+      await CouponModel.updateOne({ _id: promo.couponId, isActive: true }, [
+        {
+          $set: {
+            isActive: {
+              $cond: [
+                {
+                  $or: [
+                    {
+                      $and: [
+                        { $ne: ["$maxUsage", null] },
+                        {
+                          $gte: [
+                            { $size: { $ifNull: ["$usage", []] } },
+                            "$maxUsage",
+                          ],
+                        },
+                      ],
+                    },
+                    {
+                      $and: [
+                        { $ne: ["$couponUsageSalesLimit", null] },
+                        {
+                          $gte: ["$totalSalesUsed", "$couponUsageSalesLimit"],
+                        },
+                      ],
+                    },
+                  ],
+                },
+                false,
+                true,
+              ],
+            },
+          },
+        },
+      ]);
+    } catch {
+      /* coupon bookkeeping is best-effort; the order is already confirmed */
+    }
+  }
+
+  /**
+   * Read-only promo-code validation for the checkout UI. Returns a soft
+   * result (never throws on an invalid code) with the discount + grand
+   * total before/after so the client can show the savings line. Reuses the
+   * exact same evaluator + pricing engine the order path uses, so a preview
+   * that says ₹X off is what the buyer is actually charged.
+   */
+  async previewCoupon(
+    input: {
+      eventId: string;
+      couponCode: string;
+      tickets: { ticketId: string; quantity: number }[];
+    },
+    customerId?: string
+  ): Promise<{
+    ok: boolean;
+    code: string;
+    reason?: string;
+    discountAmount: number;
+    ticketsSubtotal: number;
+    totalBefore: number;
+    totalAfter: number;
+    pricing?: ReturnType<CartService["computePricingForLines"]>;
+  }> {
+    const code = (input.couponCode ?? "").trim().toUpperCase();
+    const empty = {
+      ok: false,
+      code,
+      reason: "Enter a promo code",
+      discountAmount: 0,
+      ticketsSubtotal: 0,
+      totalBefore: 0,
+      totalAfter: 0,
+    };
+    if (!code) return empty;
+
+    const event = await EventModel.findOne({
+      _id: input.eventId,
+      isDeleted: false,
+      isVisible: true,
+      status: EventStatus.PUBLISHED,
+      adminPaused: { $ne: true },
+    }).lean();
+    if (!event) return { ...empty, reason: "Event not available" };
+
+    const ticketMap = new Map(
+      (event.tickets ?? []).map((t: any) => [String(t._id), t])
+    );
+    const orderTickets = (input.tickets ?? [])
+      .map((line) => {
+        const ref: any = ticketMap.get(line.ticketId);
+        if (!ref) return null;
+        const qty = Math.max(0, Math.trunc(Number(line.quantity) || 0));
+        if (qty <= 0) return null;
+        return {
+          ticketTypeId: line.ticketId,
+          quantity: qty,
+          unitPrice: Number(ref.ticketPrice ?? 0),
+        };
+      })
+      .filter(Boolean) as {
+      ticketTypeId: string;
+      quantity: number;
+      unitPrice: number;
+    }[];
+    if (orderTickets.length === 0)
+      return { ...empty, reason: "Select tickets to apply a promo code" };
+
+    const ticketRefs = new Map<string, CartTicketRef>(
+      (event.tickets ?? []).map((t: any) => [
+        String(t._id),
+        { ticketGST: t.ticketGST, gstRate: t.gstRate },
+      ])
+    );
+    const [applicationFeePercent, applicationFeeGstPercent, host] =
+      await Promise.all([
+        getCachedConfigNumber(ConfigTypeEnum.platformFeeOnEvent, 5),
+        getCachedConfigNumber(ConfigTypeEnum.gstOnPlatformFeeOnEvent, 18),
+        this.loadHostGstContextForEvent(event),
+      ]);
+    const pricingLines = orderTickets.map((t) => ({
+      ticketId: t.ticketTypeId,
+      quantity: t.quantity,
+      unitPrice: t.unitPrice,
+    }));
+    const baseline = this.cart.computePricingForLines(
+      pricingLines,
+      [],
+      ticketRefs,
+      applicationFeePercent,
+      applicationFeeGstPercent,
+      host,
+      0
+    );
+    const baseFields = {
+      ticketsSubtotal: baseline.grossAmount,
+      totalBefore: baseline.totalAmount,
+      totalAfter: baseline.totalAmount,
+    };
+
+    const coupon = await CouponModel.findOne({
+      host: String(event.hostId),
+      code,
+    }).lean<any>();
+    if (
+      !coupon ||
+      (coupon.eventId && String(coupon.eventId) !== String(event._id))
+    )
+      return {
+        ...empty,
+        ...baseFields,
+        reason: "That promo code isn't valid for this event",
+      };
+
+    const usage: any[] = Array.isArray(coupon.usage) ? coupon.usage : [];
+    const customerUsageCount = customerId
+      ? usage.filter((u) => String(u.customer) === String(customerId)).length
+      : 0;
+    let isFirstSignedOrder: boolean | undefined;
+    if (coupon.couponUsageType === "FirstSignedOrder" && customerId) {
+      const prior = await OrderModel.countDocuments({
+        customerId,
+        orderStatus: {
+          $in: [OrderStatus.PAYMENT_SUCCESS, OrderStatus.CHECKED_IN],
+        },
+      });
+      isFirstSignedOrder = prior === 0;
+    }
+    const ticketLines = orderTickets.map((t) => ({
+      ticketId: t.ticketTypeId,
+      grossPaise: Math.round(t.unitPrice * 100) * t.quantity,
+    }));
+    const res = evaluateCoupon(coupon, {
+      ticketLines,
+      totalUsageCount: usage.length,
+      customerUsageCount,
+      isFirstSignedOrder,
+    });
+    if (!res.ok)
+      return {
+        ...empty,
+        ...baseFields,
+        reason: res.reason ?? "This coupon can't be applied",
+      };
+
+    const discounted = this.cart.computePricingForLines(
+      pricingLines,
+      [],
+      ticketRefs,
+      applicationFeePercent,
+      applicationFeeGstPercent,
+      host,
+      res.discountPaise
+    );
+    return {
+      ok: true,
+      code,
+      discountAmount: discounted.discountAmount,
+      ticketsSubtotal: baseline.grossAmount,
+      totalBefore: baseline.totalAmount,
+      totalAfter: discounted.totalAmount,
+      pricing: discounted,
+    };
+  }
+
+  /**
+   * Public, copyable promo codes for an event page. Returns only coupons the
+   * host marked `showToCustomers`, that are active + in their date window, and
+   * scoped either to THIS event or host-global (no eventId). `isActive` already
+   * reflects the auto-deactivation when usage/sales limits are hit.
+   */
+  async visibleCouponsForEvent(eventId: string): Promise<
+    {
+      code: string;
+      description?: string;
+      discountLabel: string;
+      minCartValue?: number;
+      endDate: Date;
+    }[]
+  > {
+    const event = await EventModel.findOne({
+      _id: eventId,
+      isDeleted: false,
+      isVisible: true,
+      status: EventStatus.PUBLISHED,
+    }).lean();
+    if (!event?.hostId) return [];
+
+    const now = new Date();
+    const coupons = await CouponModel.find({
+      host: String(event.hostId),
+      showToCustomers: true,
+      isActive: true,
+      startDate: { $lte: now },
+      endDate: { $gte: now },
+      $or: [
+        { eventId: { $in: [null, ""] } },
+        { eventId: { $exists: false } },
+        { eventId: String(eventId) },
+      ],
+    })
+      .sort({ createdAt: -1 })
+      .lean<any[]>();
+
+    const label = (c: any): string => {
+      const upto =
+        c.uptoAmount != null ? ` (up to ₹${Number(c.uptoAmount)})` : "";
+      switch (c.promoCodeDiscountType) {
+        case PromoDiscountType.Percentage:
+          return `${Number(c.discountValue ?? 0)}% OFF${upto}`;
+        case PromoDiscountType.FixedAmount:
+          return `₹${Number(c.discountValue ?? 0)} OFF`;
+        case PromoDiscountType.Free:
+          return "FREE";
+        default:
+          return "OFFER";
+      }
+    };
+
+    return coupons.map((c) => ({
+      code: c.code,
+      description: c.description ?? undefined,
+      discountLabel: label(c),
+      minCartValue: c.minCartValue ?? undefined,
+      endDate: c.endDate,
+    }));
+  }
+
   private async finalizeFreeOrder(
     customerId: string,
     event: any,
@@ -440,7 +824,8 @@ class OrderService {
     orderExtras: any[],
     pricing: ReturnType<CartService["computePricingForLines"]>,
     reservedAt: Date,
-    appliedConfigSnapshot: ReturnType<OrderService["buildConfigSnapshot"]>
+    appliedConfigSnapshot: ReturnType<OrderService["buildConfigSnapshot"]>,
+    appliedDiscount?: ReturnType<OrderService["buildCouponSnapshot"]>
   ): Promise<Order> {
     const session = await mongoose.startSession();
     let createdOrder: any = null;
@@ -501,6 +886,8 @@ class OrderService {
           tickets: orderTickets,
           extras: orderExtras,
           subtotal: pricing.grossAmount,
+          discountAmount: pricing.discountAmount,
+          appliedDiscount,
           platformFee: pricing.applicationFee,
           platformFeeGst: pricing.platformFeeGst,
           totalAmount: pricing.totalAmount,
@@ -573,6 +960,8 @@ class OrderService {
 
     await this.cart.finalizeCartForOrder(customerId, event._id.toString());
     if (createdOrder?._id) {
+      // Free orders confirm immediately → record the coupon redemption now.
+      await this.recordCouponRedemption(createdOrder);
       await postPurchaseQueue.add("APPLY_FOLLOWS_AND_SALES_LOG", {
         orderId: createdOrder._id.toString(),
       });
@@ -607,6 +996,7 @@ class OrderService {
     pageQuery?: string;
     referralCode?: string;
     promoterId?: string;
+    couponCode?: string;
   }): Promise<{
     result: CreateOrderServiceResult;
     accountFound: boolean;
@@ -659,6 +1049,7 @@ class OrderService {
       pageQuery: input.pageQuery,
       referralCode: input.referralCode,
       promoterId: input.promoterId,
+      couponCode: input.couponCode,
     });
 
     // Offline payment link → link the created order to its OfflineOrder
@@ -1238,6 +1629,15 @@ class OrderService {
       getCachedConfigNumber(ConfigTypeEnum.gstOnComission, 18),
       this.loadHostGstContextForEvent(event),
     ]);
+    // Resolve + validate any applied coupon BEFORE pricing so the discount
+    // reduces the ticket taxable (GST/fees/commission then recompute on the
+    // discounted base — see HOIZR_FINANCE_SOURCE_OF_TRUTH.md).
+    const couponResolved = await this.resolveCouponForOrder(
+      event,
+      input.couponCode,
+      orderTickets,
+      customerId
+    );
     const pricing = this.cart.computePricingForLines(
       orderTickets.map((t) => ({
         ticketId: t.ticketTypeId,
@@ -1251,9 +1651,14 @@ class OrderService {
       ticketRefs,
       applicationFeePercent,
       applicationFeeGstPercent,
-      host
+      host,
+      couponResolved?.couponDiscountPaise ?? 0
     );
     const grossAmount = pricing.grossAmount;
+    const appliedDiscount =
+      couponResolved && pricing.discountAmount > 0
+        ? this.buildCouponSnapshot(couponResolved.coupon, pricing.discountAmount)
+        : undefined;
 
     // Resolve Hoizr commission first so we can include it in the config
     // snapshot for both free and paid orders. AI-selected rate wins,
@@ -1315,7 +1720,8 @@ class OrderService {
         orderExtras,
         pricing,
         reservedAt,
-        appliedConfigSnapshot
+        appliedConfigSnapshot,
+        appliedDiscount
       );
       return { order };
     }
@@ -1357,6 +1763,8 @@ class OrderService {
       tickets: orderTickets,
       extras: orderExtras,
       subtotal: grossAmount,
+      discountAmount: pricing.discountAmount,
+      appliedDiscount,
       platformFee: pricing.applicationFee,
       platformFeeGst: pricing.platformFeeGst,
       totalAmount: pricing.totalAmount,
@@ -1783,6 +2191,8 @@ class OrderService {
     // log) via the post-purchase worker. Deterministic jobId keeps the
     // webhook + this fast-path from running the fanout twice.
     if (finalized.orderStatus === OrderStatus.PAYMENT_SUCCESS) {
+      // Paid order confirmed → record the coupon redemption (idempotent).
+      await this.recordCouponRedemption(finalized);
       await postPurchaseQueue.add(
         "APPLY_FOLLOWS_AND_SALES_LOG",
         { orderId: finalized._id.toString() },

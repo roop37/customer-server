@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@hoizr-technology/shared": ["../hoizr-shared/dist/index"]
+    }
+  }
+}
