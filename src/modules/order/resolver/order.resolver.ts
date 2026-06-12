@@ -14,6 +14,10 @@ import {
 } from "../interfaces/order.objects";
 import { CustomerOrderView, toCustomerOrderView } from "../interfaces/order.view";
 import OrderService from "../service/order.service";
+import {
+  CustomerCookieKeys,
+  setCustomerCookie,
+} from "../../../utils/cookie";
 
 @Resolver()
 export class OrderResolver {
@@ -48,15 +52,37 @@ export class OrderResolver {
 
   @Mutation(() => GuestCheckoutResponse)
   async createGuestOrder(
-    @Arg("input") input: GuestOrderInput
+    @Arg("input") input: GuestOrderInput,
+    @Ctx() ctx: Context
   ): Promise<GuestCheckoutResponse> {
-    const { result, accountFound, accountEmail } =
+    const { result, accountFound, accountEmail, loggedIn, session } =
       await this.service.createGuestOrder(input);
+    // New-account session → set the same httpOnly auth cookies the OTP-verify
+    // path sets, so the buyer is logged in immediately. Tokens never appear in
+    // the GraphQL body — only `loggedIn` is surfaced.
+    if (session) {
+      setCustomerCookie(
+        CustomerCookieKeys.ACCESS_TOKEN,
+        session.accessToken,
+        ctx.rep
+      );
+      setCustomerCookie(
+        CustomerCookieKeys.REFRESH_TOKEN,
+        session.refreshToken,
+        ctx.rep
+      );
+      setCustomerCookie(
+        CustomerCookieKeys.UNIQUE_ID,
+        session.uniqueId,
+        ctx.rep
+      );
+    }
     return {
       order: toCustomerOrderView(result.order),
       checkout: result.checkout,
       accountFound,
       accountEmail,
+      loggedIn,
     };
   }
 

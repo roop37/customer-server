@@ -105,6 +105,12 @@ export class GuestCheckoutResponse {
    *  (a***@x.com)" + the receipt goes to both this and the entered email. */
   @Field(() => String, { nullable: true })
   accountEmail?: string;
+
+  /** True when a brand-new account was created AND the buyer was logged in
+   *  (auth cookies set on the response). Existing accounts are never
+   *  auto-logged-in — the client routes them to OTP login instead. */
+  @Field(() => Boolean)
+  loggedIn: boolean;
 }
 
 /**

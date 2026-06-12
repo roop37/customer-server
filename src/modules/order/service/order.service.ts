@@ -34,6 +34,11 @@ import { resolveCustomerForOrder } from "../../customer/service/customer-resolut
 import { InvoiceModel } from "../schema/invoice.schema";
 import { generateSignedPdfUrl } from "../../../utils/cloudinary";
 import { InvoiceType } from "@hoizr-technology/shared";
+import { nanoid } from "nanoid";
+import {
+  createCustomerAuthTokens,
+  storeCustomerRefreshToken,
+} from "../../../utils/jwt";
 
 type CreateOrderServiceResult = {
   order: Order;
@@ -606,6 +611,8 @@ class OrderService {
     result: CreateOrderServiceResult;
     accountFound: boolean;
     accountEmail?: string;
+    loggedIn: boolean;
+    session?: { accessToken: string; refreshToken: string; uniqueId: string };
   }> {
     if (!input.tickets?.length && !input.extras?.length) {
       throw new ErrorWithProps("Select at least one ticket");
@@ -666,10 +673,35 @@ class OrderService {
       );
     }
 
+    // New phone (freshly created account) → issue a session so the buyer is
+    // logged in immediately (frictionless). Existing accounts are NEVER
+    // auto-logged-in from typed details — they must OTP-verify (the resolver
+    // surfaces `accountFound` so the client routes them to login). This reuses
+    // the same token utils as the OTP-verify path; the auth flow is untouched.
+    let session:
+      | { accessToken: string; refreshToken: string; uniqueId: string }
+      | undefined;
+    if (resolved.created) {
+      const uniqueId = nanoid();
+      const { accessToken, refreshToken } = createCustomerAuthTokens({
+        customer: resolved.customerId,
+        version: 0,
+        uniqueId,
+      });
+      await storeCustomerRefreshToken(
+        resolved.customerId,
+        uniqueId,
+        refreshToken
+      );
+      session = { accessToken, refreshToken, uniqueId };
+    }
+
     return {
       result,
       accountFound: resolved.existed,
       accountEmail: resolved.existed ? resolved.accountEmail : undefined,
+      loggedIn: Boolean(session),
+      session,
     };
   }
 
