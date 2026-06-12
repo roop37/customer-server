@@ -38,8 +38,18 @@ export class CartExtraLine {
 
 @ObjectType()
 export class CartPricing {
+  /**
+   * Ticket+extras TAXABLE base AFTER any coupon discount — i.e. the net base
+   * that GST, the platform fee, and host commission are all computed on. With
+   * no coupon this equals the gross ticket+extras subtotal (unchanged). The
+   * pre-discount gross can be recovered as `grossAmount + discountAmount`.
+   */
   @Field(() => Number)
   grossAmount: number;
+
+  /** Coupon discount applied to the ticket subtotal (₹; 0 when none). */
+  @Field(() => Number)
+  discountAmount: number;
 
   @Field(() => Number)
   applicationFee: number;

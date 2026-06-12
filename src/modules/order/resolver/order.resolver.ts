@@ -5,12 +5,15 @@ import {
   CreateOrderInput,
   GuestOrderInput,
   MyOrdersFilterInput,
+  PreviewCouponInput,
 } from "../interfaces/order.input";
 import {
+  CouponPreviewView,
   CreateOrderResponse,
   CustomerOrderInvoice,
   GuestCheckoutResponse,
   OfflinePaymentLinkView,
+  PublicCoupon,
 } from "../interfaces/order.objects";
 import { CustomerOrderView, toCustomerOrderView } from "../interfaces/order.view";
 import OrderService from "../service/order.service";
@@ -48,6 +51,27 @@ export class OrderResolver {
     @Arg("shortCode") shortCode: string
   ): Promise<OfflinePaymentLinkView> {
     return this.service.resolveOfflinePaymentLink(shortCode) as any;
+  }
+
+  /**
+   * Validate a promo code at checkout — PUBLIC so guests can preview too.
+   * Per-customer limits (maxUsagePerCustomer, FirstSignedOrder) only apply
+   * when the buyer is logged in; ctx.customerId is read opportunistically.
+   */
+  @Query(() => CouponPreviewView)
+  async previewCoupon(
+    @Ctx() ctx: Context,
+    @Arg("input") input: PreviewCouponInput
+  ): Promise<CouponPreviewView> {
+    return this.service.previewCoupon(input, ctx.customerId);
+  }
+
+  /** Public, copyable promo codes a host chose to show on an event page. */
+  @Query(() => [PublicCoupon])
+  async visibleCouponsForEvent(
+    @Arg("eventId") eventId: string
+  ): Promise<PublicCoupon[]> {
+    return this.service.visibleCouponsForEvent(eventId) as any;
   }
 
   @Mutation(() => GuestCheckoutResponse)

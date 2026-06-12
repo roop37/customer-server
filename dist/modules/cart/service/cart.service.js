@@ -452,7 +452,7 @@ class CartService {
      * (SoT §4 eligibility gate); ineligible hosts always get zero GST.
      * Customer platform fee + its GST come from configs.
      */
-    computePricingForLines(ticketLines, extraLines, ticketRefs, applicationFeePercent, applicationFeeGstPercent, host) {
+    computePricingForLines(ticketLines, extraLines, ticketRefs, applicationFeePercent, applicationFeeGstPercent, host, couponDiscountPaise = 0) {
         return (0, cart_pricing_1.computeCartPricingForLines)({
             ticketLines,
             extraLines,
@@ -460,6 +460,7 @@ class CartService {
             applicationFeePercent,
             applicationFeeGstPercent,
             host,
+            couponDiscountPaise,
         });
     }
     toCartResponse(stored, event, applicationFeePercent, applicationFeeGstPercent, host) {

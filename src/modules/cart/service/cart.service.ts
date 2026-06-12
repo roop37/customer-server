@@ -666,7 +666,8 @@ class CartService {
     ticketRefs: Map<string, CartTicketRef>,
     applicationFeePercent: number,
     applicationFeeGstPercent: number,
-    host: CartHostGstContext | null
+    host: CartHostGstContext | null,
+    couponDiscountPaise = 0
   ): CartPricing {
     return computeCartPricingForLines({
       ticketLines,
@@ -675,6 +676,7 @@ class CartService {
       applicationFeePercent,
       applicationFeeGstPercent,
       host,
+      couponDiscountPaise,
     });
   }
 

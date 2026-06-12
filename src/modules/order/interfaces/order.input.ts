@@ -61,6 +61,10 @@ export class CreateOrderInput {
 
   @Field(() => String, { nullable: true })
   promoterId?: string;
+
+  /** Promo/coupon code the customer applied at checkout. */
+  @Field(() => String, { nullable: true })
+  couponCode?: string;
 }
 
 @InputType()
@@ -70,6 +74,23 @@ export class GuestCartTicketInput {
 
   @Field(() => Int)
   quantity: number;
+}
+
+/**
+ * Validate a promo code against an event + the buyer's current ticket
+ * selection and return a discount preview. Read-only: never mutates the
+ * coupon or creates an order. Works for guest + logged-in buyers.
+ */
+@InputType()
+export class PreviewCouponInput {
+  @Field(() => String)
+  eventId: string;
+
+  @Field(() => String)
+  couponCode: string;
+
+  @Field(() => [GuestCartTicketInput])
+  tickets: GuestCartTicketInput[];
 }
 
 @InputType()
@@ -130,4 +151,8 @@ export class GuestOrderInput {
 
   @Field(() => String, { nullable: true })
   promoterId?: string;
+
+  /** Promo/coupon code the guest applied at checkout. */
+  @Field(() => String, { nullable: true })
+  couponCode?: string;
 }

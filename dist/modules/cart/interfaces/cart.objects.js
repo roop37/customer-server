@@ -73,6 +73,10 @@ __decorate([
 __decorate([
     (0, type_graphql_1.Field)(() => Number),
     __metadata("design:type", Number)
+], CartPricing.prototype, "discountAmount", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => Number),
+    __metadata("design:type", Number)
 ], CartPricing.prototype, "applicationFee", void 0);
 __decorate([
     (0, type_graphql_1.Field)(() => Number),

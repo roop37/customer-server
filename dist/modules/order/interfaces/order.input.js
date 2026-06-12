@@ -9,7 +9,7 @@ var __metadata = (this && this.__metadata) || function (k, v) {
     if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.GuestOrderInput = exports.GuestCartExtraInput = exports.GuestCartTicketInput = exports.CreateOrderInput = exports.GuestInfoInput = exports.UTMInput = exports.MyOrdersFilterInput = void 0;
+exports.GuestOrderInput = exports.GuestCartExtraInput = exports.PreviewCouponInput = exports.GuestCartTicketInput = exports.CreateOrderInput = exports.GuestInfoInput = exports.UTMInput = exports.MyOrdersFilterInput = void 0;
 const type_graphql_1 = require("type-graphql");
 let MyOrdersFilterInput = class MyOrdersFilterInput {
 };
@@ -100,6 +100,10 @@ __decorate([
     (0, type_graphql_1.Field)(() => String, { nullable: true }),
     __metadata("design:type", String)
 ], CreateOrderInput.prototype, "promoterId", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => String, { nullable: true }),
+    __metadata("design:type", String)
+], CreateOrderInput.prototype, "couponCode", void 0);
 exports.CreateOrderInput = CreateOrderInput = __decorate([
     (0, type_graphql_1.InputType)()
 ], CreateOrderInput);
@@ -117,6 +121,29 @@ __decorate([
 exports.GuestCartTicketInput = GuestCartTicketInput = __decorate([
     (0, type_graphql_1.InputType)()
 ], GuestCartTicketInput);
+/**
+ * Validate a promo code against an event + the buyer's current ticket
+ * selection and return a discount preview. Read-only: never mutates the
+ * coupon or creates an order. Works for guest + logged-in buyers.
+ */
+let PreviewCouponInput = class PreviewCouponInput {
+};
+exports.PreviewCouponInput = PreviewCouponInput;
+__decorate([
+    (0, type_graphql_1.Field)(() => String),
+    __metadata("design:type", String)
+], PreviewCouponInput.prototype, "eventId", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => String),
+    __metadata("design:type", String)
+], PreviewCouponInput.prototype, "couponCode", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => [GuestCartTicketInput]),
+    __metadata("design:type", Array)
+], PreviewCouponInput.prototype, "tickets", void 0);
+exports.PreviewCouponInput = PreviewCouponInput = __decorate([
+    (0, type_graphql_1.InputType)()
+], PreviewCouponInput);
 let GuestCartExtraInput = class GuestCartExtraInput {
 };
 exports.GuestCartExtraInput = GuestCartExtraInput;
@@ -192,6 +219,10 @@ __decorate([
     (0, type_graphql_1.Field)(() => String, { nullable: true }),
     __metadata("design:type", String)
 ], GuestOrderInput.prototype, "promoterId", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => String, { nullable: true }),
+    __metadata("design:type", String)
+], GuestOrderInput.prototype, "couponCode", void 0);
 exports.GuestOrderInput = GuestOrderInput = __decorate([
     (0, type_graphql_1.InputType)()
 ], GuestOrderInput);
