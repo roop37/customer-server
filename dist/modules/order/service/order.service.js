@@ -24,6 +24,8 @@ const customer_resolution_service_1 = require("../../customer/service/customer-r
 const invoice_schema_1 = require("../schema/invoice.schema");
 const cloudinary_1 = require("../../../utils/cloudinary");
 const shared_3 = require("@hoizr-technology/shared");
+const nanoid_1 = require("nanoid");
+const jwt_1 = require("../../../utils/jwt");
 const postPurchaseQueue = new bullmq_1.Queue(shared_1.QueueNames.postPurchaseQueue, {
     connection: redis_1.redisClient,
     defaultJobOptions: {
@@ -458,10 +460,28 @@ class OrderService {
                 $set: { offlineOrderId: input.offlineOrderId, source: "OFFLINE_LINK" },
             });
         }
+        // New phone (freshly created account) → issue a session so the buyer is
+        // logged in immediately (frictionless). Existing accounts are NEVER
+        // auto-logged-in from typed details — they must OTP-verify (the resolver
+        // surfaces `accountFound` so the client routes them to login). This reuses
+        // the same token utils as the OTP-verify path; the auth flow is untouched.
+        let session;
+        if (resolved.created) {
+            const uniqueId = (0, nanoid_1.nanoid)();
+            const { accessToken, refreshToken } = (0, jwt_1.createCustomerAuthTokens)({
+                customer: resolved.customerId,
+                version: 0,
+                uniqueId,
+            });
+            await (0, jwt_1.storeCustomerRefreshToken)(resolved.customerId, uniqueId, refreshToken);
+            session = { accessToken, refreshToken, uniqueId };
+        }
         return {
             result,
             accountFound: resolved.existed,
             accountEmail: resolved.existed ? resolved.accountEmail : undefined,
+            loggedIn: Boolean(session),
+            session,
         };
     }
     /**

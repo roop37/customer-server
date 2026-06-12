@@ -156,6 +156,10 @@ __decorate([
     (0, type_graphql_1.Field)(() => String, { nullable: true }),
     __metadata("design:type", String)
 ], GuestCheckoutResponse.prototype, "accountEmail", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => Boolean),
+    __metadata("design:type", Boolean)
+], GuestCheckoutResponse.prototype, "loggedIn", void 0);
 exports.GuestCheckoutResponse = GuestCheckoutResponse = __decorate([
     (0, type_graphql_1.ObjectType)()
 ], GuestCheckoutResponse);

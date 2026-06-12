@@ -22,6 +22,7 @@ const order_input_1 = require("../interfaces/order.input");
 const order_objects_1 = require("../interfaces/order.objects");
 const order_view_1 = require("../interfaces/order.view");
 const order_service_1 = __importDefault(require("../service/order.service"));
+const cookie_1 = require("../../../utils/cookie");
 let OrderResolver = class OrderResolver {
     constructor() {
         this.service = new order_service_1.default();
@@ -43,13 +44,22 @@ let OrderResolver = class OrderResolver {
     async offlinePaymentLink(shortCode) {
         return this.service.resolveOfflinePaymentLink(shortCode);
     }
-    async createGuestOrder(input) {
-        const { result, accountFound, accountEmail } = await this.service.createGuestOrder(input);
+    async createGuestOrder(input, ctx) {
+        const { result, accountFound, accountEmail, loggedIn, session } = await this.service.createGuestOrder(input);
+        // New-account session → set the same httpOnly auth cookies the OTP-verify
+        // path sets, so the buyer is logged in immediately. Tokens never appear in
+        // the GraphQL body — only `loggedIn` is surfaced.
+        if (session) {
+            (0, cookie_1.setCustomerCookie)(cookie_1.CustomerCookieKeys.ACCESS_TOKEN, session.accessToken, ctx.rep);
+            (0, cookie_1.setCustomerCookie)(cookie_1.CustomerCookieKeys.REFRESH_TOKEN, session.refreshToken, ctx.rep);
+            (0, cookie_1.setCustomerCookie)(cookie_1.CustomerCookieKeys.UNIQUE_ID, session.uniqueId, ctx.rep);
+        }
         return {
             order: (0, order_view_1.toCustomerOrderView)(result.order),
             checkout: result.checkout,
             accountFound,
             accountEmail,
+            loggedIn,
         };
     }
     /**
@@ -104,8 +114,9 @@ __decorate([
 __decorate([
     (0, type_graphql_1.Mutation)(() => order_objects_1.GuestCheckoutResponse),
     __param(0, (0, type_graphql_1.Arg)("input")),
+    __param(1, (0, type_graphql_1.Ctx)()),
     __metadata("design:type", Function),
-    __metadata("design:paramtypes", [order_input_1.GuestOrderInput]),
+    __metadata("design:paramtypes", [order_input_1.GuestOrderInput, Object]),
     __metadata("design:returntype", Promise)
 ], OrderResolver.prototype, "createGuestOrder", null);
 __decorate([
