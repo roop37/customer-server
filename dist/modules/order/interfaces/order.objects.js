@@ -9,8 +9,9 @@ var __metadata = (this && this.__metadata) || function (k, v) {
     if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.CustomerOrderInvoice = exports.GuestCheckoutResponse = exports.OfflinePaymentLinkView = exports.OfflineLinkLine = exports.CreateOrderResponse = exports.RazorpayCheckoutPayload = void 0;
+exports.CustomerOrderInvoice = exports.GuestCheckoutResponse = exports.PublicCoupon = exports.CouponPreviewView = exports.OfflinePaymentLinkView = exports.OfflineLinkLine = exports.CreateOrderResponse = exports.RazorpayCheckoutPayload = void 0;
 const type_graphql_1 = require("type-graphql");
+const cart_objects_1 = require("../../cart/interfaces/cart.objects");
 const order_view_1 = require("./order.view");
 let RazorpayCheckoutPayload = class RazorpayCheckoutPayload {
 };
@@ -137,6 +138,82 @@ __decorate([
 exports.OfflinePaymentLinkView = OfflinePaymentLinkView = __decorate([
     (0, type_graphql_1.ObjectType)()
 ], OfflinePaymentLinkView);
+/**
+ * Result of validating a promo code at checkout (previewCoupon query).
+ * `ok=false` carries a human `reason`; `ok=true` carries the discount and
+ * the grand-total before/after so the UI can show the savings line without
+ * re-deriving the pricing math (which lives server-side).
+ */
+let CouponPreviewView = class CouponPreviewView {
+};
+exports.CouponPreviewView = CouponPreviewView;
+__decorate([
+    (0, type_graphql_1.Field)(() => Boolean),
+    __metadata("design:type", Boolean)
+], CouponPreviewView.prototype, "ok", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => String),
+    __metadata("design:type", String)
+], CouponPreviewView.prototype, "code", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => String, { nullable: true }),
+    __metadata("design:type", String)
+], CouponPreviewView.prototype, "reason", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => Number),
+    __metadata("design:type", Number)
+], CouponPreviewView.prototype, "discountAmount", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => Number),
+    __metadata("design:type", Number)
+], CouponPreviewView.prototype, "ticketsSubtotal", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => Number),
+    __metadata("design:type", Number)
+], CouponPreviewView.prototype, "totalBefore", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => Number),
+    __metadata("design:type", Number)
+], CouponPreviewView.prototype, "totalAfter", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => cart_objects_1.CartPricing, { nullable: true }),
+    __metadata("design:type", cart_objects_1.CartPricing)
+], CouponPreviewView.prototype, "pricing", void 0);
+exports.CouponPreviewView = CouponPreviewView = __decorate([
+    (0, type_graphql_1.ObjectType)()
+], CouponPreviewView);
+/**
+ * A coupon the host chose to display publicly on the event page
+ * (`showToCustomers`). Read-only marketing surface — customers copy the
+ * `code` and apply it at checkout. Only active, in-window codes scoped to
+ * this event (or host-global) are returned.
+ */
+let PublicCoupon = class PublicCoupon {
+};
+exports.PublicCoupon = PublicCoupon;
+__decorate([
+    (0, type_graphql_1.Field)(() => String),
+    __metadata("design:type", String)
+], PublicCoupon.prototype, "code", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => String, { nullable: true }),
+    __metadata("design:type", String)
+], PublicCoupon.prototype, "description", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => String),
+    __metadata("design:type", String)
+], PublicCoupon.prototype, "discountLabel", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => Number, { nullable: true }),
+    __metadata("design:type", Number)
+], PublicCoupon.prototype, "minCartValue", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => Date),
+    __metadata("design:type", Date)
+], PublicCoupon.prototype, "endDate", void 0);
+exports.PublicCoupon = PublicCoupon = __decorate([
+    (0, type_graphql_1.ObjectType)()
+], PublicCoupon);
 let GuestCheckoutResponse = class GuestCheckoutResponse {
 };
 exports.GuestCheckoutResponse = GuestCheckoutResponse;

@@ -6,6 +6,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const shared_1 = require("@hoizr-technology/shared");
 const configs_cache_1 = require("../../../utils/configs-cache");
 const typegoose_1 = require("@typegoose/typegoose");
+const coupon_eval_1 = require("./coupon-eval");
 const bullmq_1 = require("bullmq");
 const mercurius_1 = require("mercurius");
 const qr_hash_1 = require("../../../utils/qr-hash");
@@ -26,6 +27,11 @@ const cloudinary_1 = require("../../../utils/cloudinary");
 const shared_3 = require("@hoizr-technology/shared");
 const nanoid_1 = require("nanoid");
 const jwt_1 = require("../../../utils/jwt");
+// Same `coupons` collection main-server writes — customer-server reads it to
+// validate/redeem at checkout (Coupon class is shared).
+const CouponModel = (0, typegoose_1.getModelForClass)(shared_1.Coupon, {
+    schemaOptions: { timestamps: true, collection: "coupons" },
+});
 const postPurchaseQueue = new bullmq_1.Queue(shared_1.QueueNames.postPurchaseQueue, {
     connection: redis_1.redisClient,
     defaultJobOptions: {
@@ -298,7 +304,312 @@ class OrderService {
             },
         }, session ? { session } : undefined);
     }
-    async finalizeFreeOrder(customerId, event, input, orderTickets, orderExtras, pricing, reservedAt, appliedConfigSnapshot) {
+    /**
+     * Resolve + validate a coupon for an order being created. Throws a clear
+     * message if a code was supplied but can't be applied (so the customer never
+     * silently pays full price after expecting a discount). Returns null when no
+     * code was given.
+     */
+    async resolveCouponForOrder(event, couponCode, orderTickets, customerId) {
+        if (!couponCode?.trim())
+            return null;
+        const code = couponCode.trim().toUpperCase();
+        const coupon = await CouponModel.findOne({
+            host: String(event.hostId),
+            code,
+        }).lean();
+        if (!coupon)
+            throw new mercurius_1.ErrorWithProps("That promo code isn't valid for this event");
+        // Event-scoped coupon (coupon.eventId set) is valid only for that event;
+        // a global host promo (no eventId) works for any of the host's events.
+        if (coupon.eventId && String(coupon.eventId) !== String(event._id))
+            throw new mercurius_1.ErrorWithProps("That promo code isn't valid for this event");
+        const ticketLines = orderTickets.map((t) => ({
+            ticketId: t.ticketTypeId,
+            grossPaise: Math.round(Number(t.unitPrice) * 100) *
+                Math.max(0, Math.trunc(t.quantity)),
+        }));
+        const usage = Array.isArray(coupon.usage) ? coupon.usage : [];
+        const customerUsageCount = customerId
+            ? usage.filter((u) => String(u.customer) === String(customerId)).length
+            : 0;
+        let isFirstSignedOrder;
+        if (coupon.couponUsageType === "FirstSignedOrder" && customerId) {
+            const prior = await order_schema_1.OrderModel.countDocuments({
+                customerId,
+                orderStatus: {
+                    $in: [shared_1.OrderStatus.PAYMENT_SUCCESS, shared_1.OrderStatus.CHECKED_IN],
+                },
+            });
+            isFirstSignedOrder = prior === 0;
+        }
+        const res = (0, coupon_eval_1.evaluateCoupon)(coupon, {
+            ticketLines,
+            totalUsageCount: usage.length,
+            customerUsageCount,
+            isFirstSignedOrder,
+        });
+        if (!res.ok)
+            throw new mercurius_1.ErrorWithProps(res.reason ?? "This coupon can't be applied");
+        return { couponDiscountPaise: res.discountPaise, coupon };
+    }
+    /** Frozen order snapshot for a redeemed coupon (PROMO discount). */
+    buildCouponSnapshot(coupon, discountAmount) {
+        return {
+            discountType: shared_1.OrderDiscountType.PROMO,
+            discountAmount,
+            promoData: {
+                couponId: String(coupon._id),
+                code: coupon.code,
+                discountType: coupon.promoCodeDiscountType,
+                discountValue: coupon.discountValue,
+                uptoAmount: coupon.uptoAmount,
+                discountAmount,
+            },
+        };
+    }
+    /**
+     * Idempotently record a coupon redemption once an order is CONFIRMED, and
+     * auto-deactivate the coupon when its overall usage count or sales limit is
+     * reached. Never throws — coupon bookkeeping must not break a paid order.
+     */
+    async recordCouponRedemption(order) {
+        const promo = order?.appliedDiscount?.promoData;
+        if (!promo?.couponId)
+            return;
+        const orderId = String(order._id);
+        const saleAmount = Number(order.subtotal ?? 0);
+        try {
+            await CouponModel.updateOne({ _id: promo.couponId, "usage.orderId": { $ne: orderId } }, {
+                $push: {
+                    usage: {
+                        customer: order.customerId
+                            ? String(order.customerId)
+                            : undefined,
+                        orderId,
+                        email: order.guestInfo?.email,
+                        phone: order.guestInfo?.phone,
+                        name: [order.guestInfo?.firstName, order.guestInfo?.lastName]
+                            .filter(Boolean)
+                            .join(" ") || undefined,
+                        discountApplied: Number(order.discountAmount ?? 0),
+                        saleAmount,
+                        usedAt: new Date(),
+                    },
+                },
+                $inc: { totalSalesUsed: saleAmount },
+            });
+            await CouponModel.updateOne({ _id: promo.couponId, isActive: true }, [
+                {
+                    $set: {
+                        isActive: {
+                            $cond: [
+                                {
+                                    $or: [
+                                        {
+                                            $and: [
+                                                { $ne: ["$maxUsage", null] },
+                                                {
+                                                    $gte: [
+                                                        { $size: { $ifNull: ["$usage", []] } },
+                                                        "$maxUsage",
+                                                    ],
+                                                },
+                                            ],
+                                        },
+                                        {
+                                            $and: [
+                                                { $ne: ["$couponUsageSalesLimit", null] },
+                                                {
+                                                    $gte: ["$totalSalesUsed", "$couponUsageSalesLimit"],
+                                                },
+                                            ],
+                                        },
+                                    ],
+                                },
+                                false,
+                                true,
+                            ],
+                        },
+                    },
+                },
+            ]);
+        }
+        catch {
+            /* coupon bookkeeping is best-effort; the order is already confirmed */
+        }
+    }
+    /**
+     * Read-only promo-code validation for the checkout UI. Returns a soft
+     * result (never throws on an invalid code) with the discount + grand
+     * total before/after so the client can show the savings line. Reuses the
+     * exact same evaluator + pricing engine the order path uses, so a preview
+     * that says ₹X off is what the buyer is actually charged.
+     */
+    async previewCoupon(input, customerId) {
+        const code = (input.couponCode ?? "").trim().toUpperCase();
+        const empty = {
+            ok: false,
+            code,
+            reason: "Enter a promo code",
+            discountAmount: 0,
+            ticketsSubtotal: 0,
+            totalBefore: 0,
+            totalAfter: 0,
+        };
+        if (!code)
+            return empty;
+        const event = await event_schema_1.EventModel.findOne({
+            _id: input.eventId,
+            isDeleted: false,
+            isVisible: true,
+            status: shared_1.EventStatus.PUBLISHED,
+            adminPaused: { $ne: true },
+        }).lean();
+        if (!event)
+            return { ...empty, reason: "Event not available" };
+        const ticketMap = new Map((event.tickets ?? []).map((t) => [String(t._id), t]));
+        const orderTickets = (input.tickets ?? [])
+            .map((line) => {
+            const ref = ticketMap.get(line.ticketId);
+            if (!ref)
+                return null;
+            const qty = Math.max(0, Math.trunc(Number(line.quantity) || 0));
+            if (qty <= 0)
+                return null;
+            return {
+                ticketTypeId: line.ticketId,
+                quantity: qty,
+                unitPrice: Number(ref.ticketPrice ?? 0),
+            };
+        })
+            .filter(Boolean);
+        if (orderTickets.length === 0)
+            return { ...empty, reason: "Select tickets to apply a promo code" };
+        const ticketRefs = new Map((event.tickets ?? []).map((t) => [
+            String(t._id),
+            { ticketGST: t.ticketGST, gstRate: t.gstRate },
+        ]));
+        const [applicationFeePercent, applicationFeeGstPercent, host] = await Promise.all([
+            (0, configs_cache_1.getCachedConfigNumber)(shared_1.ConfigTypeEnum.platformFeeOnEvent, 5),
+            (0, configs_cache_1.getCachedConfigNumber)(shared_1.ConfigTypeEnum.gstOnPlatformFeeOnEvent, 18),
+            this.loadHostGstContextForEvent(event),
+        ]);
+        const pricingLines = orderTickets.map((t) => ({
+            ticketId: t.ticketTypeId,
+            quantity: t.quantity,
+            unitPrice: t.unitPrice,
+        }));
+        const baseline = this.cart.computePricingForLines(pricingLines, [], ticketRefs, applicationFeePercent, applicationFeeGstPercent, host, 0);
+        const baseFields = {
+            ticketsSubtotal: baseline.grossAmount,
+            totalBefore: baseline.totalAmount,
+            totalAfter: baseline.totalAmount,
+        };
+        const coupon = await CouponModel.findOne({
+            host: String(event.hostId),
+            code,
+        }).lean();
+        if (!coupon ||
+            (coupon.eventId && String(coupon.eventId) !== String(event._id)))
+            return {
+                ...empty,
+                ...baseFields,
+                reason: "That promo code isn't valid for this event",
+            };
+        const usage = Array.isArray(coupon.usage) ? coupon.usage : [];
+        const customerUsageCount = customerId
+            ? usage.filter((u) => String(u.customer) === String(customerId)).length
+            : 0;
+        let isFirstSignedOrder;
+        if (coupon.couponUsageType === "FirstSignedOrder" && customerId) {
+            const prior = await order_schema_1.OrderModel.countDocuments({
+                customerId,
+                orderStatus: {
+                    $in: [shared_1.OrderStatus.PAYMENT_SUCCESS, shared_1.OrderStatus.CHECKED_IN],
+                },
+            });
+            isFirstSignedOrder = prior === 0;
+        }
+        const ticketLines = orderTickets.map((t) => ({
+            ticketId: t.ticketTypeId,
+            grossPaise: Math.round(t.unitPrice * 100) * t.quantity,
+        }));
+        const res = (0, coupon_eval_1.evaluateCoupon)(coupon, {
+            ticketLines,
+            totalUsageCount: usage.length,
+            customerUsageCount,
+            isFirstSignedOrder,
+        });
+        if (!res.ok)
+            return {
+                ...empty,
+                ...baseFields,
+                reason: res.reason ?? "This coupon can't be applied",
+            };
+        const discounted = this.cart.computePricingForLines(pricingLines, [], ticketRefs, applicationFeePercent, applicationFeeGstPercent, host, res.discountPaise);
+        return {
+            ok: true,
+            code,
+            discountAmount: discounted.discountAmount,
+            ticketsSubtotal: baseline.grossAmount,
+            totalBefore: baseline.totalAmount,
+            totalAfter: discounted.totalAmount,
+            pricing: discounted,
+        };
+    }
+    /**
+     * Public, copyable promo codes for an event page. Returns only coupons the
+     * host marked `showToCustomers`, that are active + in their date window, and
+     * scoped either to THIS event or host-global (no eventId). `isActive` already
+     * reflects the auto-deactivation when usage/sales limits are hit.
+     */
+    async visibleCouponsForEvent(eventId) {
+        const event = await event_schema_1.EventModel.findOne({
+            _id: eventId,
+            isDeleted: false,
+            isVisible: true,
+            status: shared_1.EventStatus.PUBLISHED,
+        }).lean();
+        if (!event?.hostId)
+            return [];
+        const now = new Date();
+        const coupons = await CouponModel.find({
+            host: String(event.hostId),
+            showToCustomers: true,
+            isActive: true,
+            startDate: { $lte: now },
+            endDate: { $gte: now },
+            $or: [
+                { eventId: { $in: [null, ""] } },
+                { eventId: { $exists: false } },
+                { eventId: String(eventId) },
+            ],
+        })
+            .sort({ createdAt: -1 })
+            .lean();
+        const label = (c) => {
+            const upto = c.uptoAmount != null ? ` (up to ₹${Number(c.uptoAmount)})` : "";
+            switch (c.promoCodeDiscountType) {
+                case shared_1.PromoDiscountType.Percentage:
+                    return `${Number(c.discountValue ?? 0)}% OFF${upto}`;
+                case shared_1.PromoDiscountType.FixedAmount:
+                    return `₹${Number(c.discountValue ?? 0)} OFF`;
+                case shared_1.PromoDiscountType.Free:
+                    return "FREE";
+                default:
+                    return "OFFER";
+            }
+        };
+        return coupons.map((c) => ({
+            code: c.code,
+            description: c.description ?? undefined,
+            discountLabel: label(c),
+            minCartValue: c.minCartValue ?? undefined,
+            endDate: c.endDate,
+        }));
+    }
+    async finalizeFreeOrder(customerId, event, input, orderTickets, orderExtras, pricing, reservedAt, appliedConfigSnapshot, appliedDiscount) {
         const session = await typegoose_1.mongoose.startSession();
         let createdOrder = null;
         try {
@@ -342,6 +653,8 @@ class OrderService {
                     tickets: orderTickets,
                     extras: orderExtras,
                     subtotal: pricing.grossAmount,
+                    discountAmount: pricing.discountAmount,
+                    appliedDiscount,
                     platformFee: pricing.applicationFee,
                     platformFeeGst: pricing.platformFeeGst,
                     totalAmount: pricing.totalAmount,
@@ -395,6 +708,8 @@ class OrderService {
         }
         await this.cart.finalizeCartForOrder(customerId, event._id.toString());
         if (createdOrder?._id) {
+            // Free orders confirm immediately → record the coupon redemption now.
+            await this.recordCouponRedemption(createdOrder);
             await postPurchaseQueue.add("APPLY_FOLLOWS_AND_SALES_LOG", {
                 orderId: createdOrder._id.toString(),
             });
@@ -451,6 +766,7 @@ class OrderService {
             pageQuery: input.pageQuery,
             referralCode: input.referralCode,
             promoterId: input.promoterId,
+            couponCode: input.couponCode,
         });
         // Offline payment link → link the created order to its OfflineOrder
         // exactly (no fuzzy matching). The OfflineOrder flips to PAID when the
@@ -905,6 +1221,10 @@ class OrderService {
             (0, configs_cache_1.getCachedConfigNumber)(shared_1.ConfigTypeEnum.gstOnComission, 18),
             this.loadHostGstContextForEvent(event),
         ]);
+        // Resolve + validate any applied coupon BEFORE pricing so the discount
+        // reduces the ticket taxable (GST/fees/commission then recompute on the
+        // discounted base — see HOIZR_FINANCE_SOURCE_OF_TRUTH.md).
+        const couponResolved = await this.resolveCouponForOrder(event, input.couponCode, orderTickets, customerId);
         const pricing = this.cart.computePricingForLines(orderTickets.map((t) => ({
             ticketId: t.ticketTypeId,
             quantity: t.quantity,
@@ -912,8 +1232,11 @@ class OrderService {
         })), orderExtras.map((e) => ({
             quantity: e.quantity,
             unitPrice: e.unitPrice,
-        })), ticketRefs, applicationFeePercent, applicationFeeGstPercent, host);
+        })), ticketRefs, applicationFeePercent, applicationFeeGstPercent, host, couponResolved?.couponDiscountPaise ?? 0);
         const grossAmount = pricing.grossAmount;
+        const appliedDiscount = couponResolved && pricing.discountAmount > 0
+            ? this.buildCouponSnapshot(couponResolved.coupon, pricing.discountAmount)
+            : undefined;
         // Resolve Hoizr commission first so we can include it in the config
         // snapshot for both free and paid orders. AI-selected rate wins,
         // fallback to the basic pricing plan; hard fail otherwise — we
@@ -955,7 +1278,7 @@ class OrderService {
                 : undefined,
         });
         if (pricing.totalAmount <= 0) {
-            const order = await this.finalizeFreeOrder(customerId, event, input, orderTickets, orderExtras, pricing, reservedAt, appliedConfigSnapshot);
+            const order = await this.finalizeFreeOrder(customerId, event, input, orderTickets, orderExtras, pricing, reservedAt, appliedConfigSnapshot, appliedDiscount);
             return { order };
         }
         const hoizrCommission = +(grossAmount *
@@ -975,6 +1298,8 @@ class OrderService {
             tickets: orderTickets,
             extras: orderExtras,
             subtotal: grossAmount,
+            discountAmount: pricing.discountAmount,
+            appliedDiscount,
             platformFee: pricing.applicationFee,
             platformFeeGst: pricing.platformFeeGst,
             totalAmount: pricing.totalAmount,
@@ -1296,6 +1621,8 @@ class OrderService {
         // log) via the post-purchase worker. Deterministic jobId keeps the
         // webhook + this fast-path from running the fanout twice.
         if (finalized.orderStatus === shared_1.OrderStatus.PAYMENT_SUCCESS) {
+            // Paid order confirmed → record the coupon redemption (idempotent).
+            await this.recordCouponRedemption(finalized);
             await postPurchaseQueue.add("APPLY_FOLLOWS_AND_SALES_LOG", { orderId: finalized._id.toString() }, {
                 jobId: `post_purchase:${finalized._id.toString()}`,
                 attempts: 3,

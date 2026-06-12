@@ -44,6 +44,18 @@ let OrderResolver = class OrderResolver {
     async offlinePaymentLink(shortCode) {
         return this.service.resolveOfflinePaymentLink(shortCode);
     }
+    /**
+     * Validate a promo code at checkout — PUBLIC so guests can preview too.
+     * Per-customer limits (maxUsagePerCustomer, FirstSignedOrder) only apply
+     * when the buyer is logged in; ctx.customerId is read opportunistically.
+     */
+    async previewCoupon(ctx, input) {
+        return this.service.previewCoupon(input, ctx.customerId);
+    }
+    /** Public, copyable promo codes a host chose to show on an event page. */
+    async visibleCouponsForEvent(eventId) {
+        return this.service.visibleCouponsForEvent(eventId);
+    }
     async createGuestOrder(input, ctx) {
         const { result, accountFound, accountEmail, loggedIn, session } = await this.service.createGuestOrder(input);
         // New-account session → set the same httpOnly auth cookies the OTP-verify
@@ -111,6 +123,21 @@ __decorate([
     __metadata("design:paramtypes", [String]),
     __metadata("design:returntype", Promise)
 ], OrderResolver.prototype, "offlinePaymentLink", null);
+__decorate([
+    (0, type_graphql_1.Query)(() => order_objects_1.CouponPreviewView),
+    __param(0, (0, type_graphql_1.Ctx)()),
+    __param(1, (0, type_graphql_1.Arg)("input")),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [Object, order_input_1.PreviewCouponInput]),
+    __metadata("design:returntype", Promise)
+], OrderResolver.prototype, "previewCoupon", null);
+__decorate([
+    (0, type_graphql_1.Query)(() => [order_objects_1.PublicCoupon]),
+    __param(0, (0, type_graphql_1.Arg)("eventId")),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [String]),
+    __metadata("design:returntype", Promise)
+], OrderResolver.prototype, "visibleCouponsForEvent", null);
 __decorate([
     (0, type_graphql_1.Mutation)(() => order_objects_1.GuestCheckoutResponse),
     __param(0, (0, type_graphql_1.Arg)("input")),
