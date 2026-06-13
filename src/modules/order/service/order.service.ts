@@ -1041,14 +1041,13 @@ class OrderService {
       );
     }
 
-    // Marketing opt-in applies only to a freshly created account (don't flip
-    // an existing customer's preference from a guest purchase).
-    if (resolved.created && input.notifyMe !== false) {
-      await CustomerModel.updateOne(
-        { _id: resolved.customerId },
-        { $set: { emailMarketingOptIn: true, whatsappMarketingOptIn: true } }
-      );
-    }
+    // NOTE: a guest purchase does exactly four things — take the contact
+    // details, create the account if the phone is new, place the order, and
+    // (for a freshly created account) log the buyer in. We deliberately do
+    // NOT silently flip marketing opt-ins here: subscribing someone to
+    // WhatsApp/email from a ticket purchase they didn't consent to is a
+    // surprise side effect. Marketing preferences are set explicitly from the
+    // profile/preferences surfaces, not as a hidden effect of checkout.
 
     // Seed the cart for this customer, then run the normal order flow.
     await this.cart.setCart(resolved.customerId, {

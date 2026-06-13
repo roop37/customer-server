@@ -10,12 +10,16 @@ import {
 const escapeRegex = (value: string): string =>
   value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-// Only admin-verified, active, non-deleted venues are publicly listable.
-// Mirrors the visibility gate the event module applies before exposing a
-// host. `isDeleted: { $ne: true }` (not `false`) so a legacy doc missing
-// the field still surfaces.
+// Onboarded, active, non-deleted venues are publicly listable. We gate on
+// `onboardingCompleted` (set when a host finishes profile setup) rather than
+// `isAdminVerified` — the latter is a separate manual admin step that is NOT
+// part of going live, so requiring it would 404 every host that has live
+// events but was never manually verified. This mirrors how the event module
+// exposes a host (it does not check `isAdminVerified` at all).
+// `isDeleted: { $ne: true }` (not `false`) so a doc missing the field still
+// surfaces.
 const PUBLIC_VENUE_FILTER = {
-  isAdminVerified: true,
+  onboardingCompleted: true,
   isActive: true,
   isDeleted: { $ne: true },
 } as const;
