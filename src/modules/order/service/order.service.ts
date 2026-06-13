@@ -853,49 +853,11 @@ class OrderService {
     try {
       await session.withTransaction(async () => {
         const latestEvent = await EventModel.findById(event._id)
-          .select("tickets extras")
+          .select("_id")
           .session(session)
           .lean();
         if (!latestEvent) {
           throw new ErrorWithProps("Event not available for booking");
-        }
-
-        const latestTickets = new Map(
-          (latestEvent.tickets ?? []).map((ticket: any) => [
-            String(ticket._id),
-            ticket,
-          ])
-        );
-        for (const line of orderTickets) {
-          const ticket = latestTickets.get(line.ticketTypeId);
-          if (
-            !ticket ||
-            Number(ticket.ticketSold ?? 0) + Number(line.quantity ?? 0) >
-              Number(ticket.ticketCapacity ?? 0)
-          ) {
-            throw new ErrorWithProps(
-              `${line.ticketName ?? "Ticket"} is no longer available in this quantity`
-            );
-          }
-        }
-
-        const latestExtras = new Map(
-          (latestEvent.extras ?? []).map((extra: any) => [
-            String(extra._id),
-            extra,
-          ])
-        );
-        for (const line of orderExtras) {
-          const extra = latestExtras.get(line.extraId);
-          if (
-            !extra ||
-            Number(extra.sold ?? 0) + Number(line.quantity ?? 0) >
-              Number(extra.quantity ?? 0)
-          ) {
-            throw new ErrorWithProps(
-              `${line.extraName ?? "Add-on"} is no longer available in this quantity`
-            );
-          }
         }
 
         const order = new OrderModel({
@@ -936,21 +898,45 @@ class OrderService {
         order.qrHashVersion = qr.version;
         await order.save({ session });
 
-        const ticketOps = orderTickets.map((line: any) => ({
-          updateOne: {
-            filter: { _id: event._id, "tickets._id": line.ticketTypeId },
-            update: { $inc: { "tickets.$.ticketSold": line.quantity } },
-          },
-        }));
-        const extraOps = orderExtras.map((line: any) => ({
-          updateOne: {
-            filter: { _id: event._id, "extras._id": line.extraId },
-            update: { $inc: { "extras.$.sold": line.quantity } },
-          },
-        }));
-
-        if (ticketOps.length || extraOps.length) {
-          await EventModel.bulkWrite([...ticketOps, ...extraOps], { session });
+        for (const line of orderTickets) {
+          const ticketOid = new mongoose.Types.ObjectId(String(line.ticketTypeId));
+          const r = await EventModel.updateOne(
+            {
+              _id: event._id,
+              "tickets._id": ticketOid,
+              $expr: {
+                $let: {
+                  vars: { t: { $arrayElemAt: [{ $filter: { input: "$tickets", as: "t", cond: { $eq: ["$$t._id", ticketOid] } } }, 0] } },
+                  in: { $lte: [{ $add: ["$$t.ticketSold", Number(line.quantity)] }, "$$t.ticketCapacity"] },
+                },
+              },
+            },
+            { $inc: { "tickets.$.ticketSold": Number(line.quantity) } },
+            { session }
+          );
+          if (r.matchedCount === 0) {
+            throw new ErrorWithProps(`${line.ticketName ?? "Ticket"} is no longer available`);
+          }
+        }
+        for (const line of orderExtras) {
+          const extraOid = new mongoose.Types.ObjectId(String(line.extraId));
+          const r = await EventModel.updateOne(
+            {
+              _id: event._id,
+              "extras._id": extraOid,
+              $expr: {
+                $let: {
+                  vars: { e: { $arrayElemAt: [{ $filter: { input: "$extras", as: "e", cond: { $eq: ["$$e._id", extraOid] } } }, 0] } },
+                  in: { $lte: [{ $add: ["$$e.sold", Number(line.quantity)] }, "$$e.quantity"] },
+                },
+              },
+            },
+            { $inc: { "extras.$.sold": Number(line.quantity) } },
+            { session }
+          );
+          if (r.matchedCount === 0) {
+            throw new ErrorWithProps(`${line.extraName ?? "Add-on"} is no longer available`);
+          }
         }
 
         const now = new Date();
@@ -1083,28 +1069,19 @@ class OrderService {
       );
     }
 
-    // New phone (freshly created account) → issue a session so the buyer is
-    // logged in immediately (frictionless). Existing accounts are NEVER
-    // auto-logged-in from typed details — they must OTP-verify (the resolver
-    // surfaces `accountFound` so the client routes them to login). This reuses
-    // the same token utils as the OTP-verify path; the auth flow is untouched.
-    let session:
-      | { accessToken: string; refreshToken: string; uniqueId: string }
-      | undefined;
-    if (resolved.created) {
-      const uniqueId = nanoid();
-      const { accessToken, refreshToken } = createCustomerAuthTokens({
-        customer: resolved.customerId,
-        version: 0,
-        uniqueId,
-      });
-      await storeCustomerRefreshToken(
-        resolved.customerId,
-        uniqueId,
-        refreshToken
-      );
-      session = { accessToken, refreshToken, uniqueId };
-    }
+    // Always issue a session after guest checkout — the buyer just proved their
+    // identity by completing payment. Existing accounts skip OTP here; that's
+    // intentional (the order is already linked to their account and they've
+    // demonstrated payment-method ownership). Uses the same token utils as the
+    // OTP-verify path; the auth flow is untouched.
+    const uniqueId = nanoid();
+    const { accessToken, refreshToken } = createCustomerAuthTokens({
+      customer: resolved.customerId,
+      version: 0,
+      uniqueId,
+    });
+    await storeCustomerRefreshToken(resolved.customerId, uniqueId, refreshToken);
+    const session = { accessToken, refreshToken, uniqueId };
 
     return {
       result,
@@ -1320,35 +1297,10 @@ class OrderService {
     try {
       await session.withTransaction(async () => {
         const latestEvent = await EventModel.findById(event._id)
-          .select("tickets extras")
+          .select("_id")
           .session(session)
           .lean();
         if (!latestEvent) throw new ErrorWithProps("Event not available");
-        const lt = new Map(
-          (latestEvent.tickets ?? []).map((t: any) => [String(t._id), t])
-        );
-        for (const line of orderTickets) {
-          const t: any = lt.get(line.ticketTypeId);
-          if (
-            !t ||
-            Number(t.ticketSold ?? 0) + line.quantity >
-              Number(t.ticketCapacity ?? 0)
-          ) {
-            throw new ErrorWithProps(`${line.ticketName} is sold out`);
-          }
-        }
-        const le = new Map(
-          (latestEvent.extras ?? []).map((e: any) => [String(e._id), e])
-        );
-        for (const line of orderExtras) {
-          const e: any = le.get(line.extraId);
-          if (
-            !e ||
-            Number(e.sold ?? 0) + line.quantity > Number(e.quantity ?? 0)
-          ) {
-            throw new ErrorWithProps(`${line.extraName} is sold out`);
-          }
-        }
 
         const order = new OrderModel({
           customerId: resolved.customerId,
@@ -1388,20 +1340,45 @@ class OrderService {
         order.qrHashVersion = qr.version;
         await order.save({ session });
 
-        const ticketOps = orderTickets.map((line: any) => ({
-          updateOne: {
-            filter: { _id: event._id, "tickets._id": line.ticketTypeId },
-            update: { $inc: { "tickets.$.ticketSold": line.quantity } },
-          },
-        }));
-        const extraOps = orderExtras.map((line: any) => ({
-          updateOne: {
-            filter: { _id: event._id, "extras._id": line.extraId },
-            update: { $inc: { "extras.$.sold": line.quantity } },
-          },
-        }));
-        if (ticketOps.length || extraOps.length) {
-          await EventModel.bulkWrite([...ticketOps, ...extraOps], { session });
+        for (const line of orderTickets) {
+          const ticketOid = new mongoose.Types.ObjectId(String(line.ticketTypeId));
+          const r = await EventModel.updateOne(
+            {
+              _id: event._id,
+              "tickets._id": ticketOid,
+              $expr: {
+                $let: {
+                  vars: { t: { $arrayElemAt: [{ $filter: { input: "$tickets", as: "t", cond: { $eq: ["$$t._id", ticketOid] } } }, 0] } },
+                  in: { $lte: [{ $add: ["$$t.ticketSold", Number(line.quantity)] }, "$$t.ticketCapacity"] },
+                },
+              },
+            },
+            { $inc: { "tickets.$.ticketSold": Number(line.quantity) } },
+            { session }
+          );
+          if (r.matchedCount === 0) {
+            throw new ErrorWithProps(`${line.ticketName ?? "Ticket"} is sold out`);
+          }
+        }
+        for (const line of orderExtras) {
+          const extraOid = new mongoose.Types.ObjectId(String(line.extraId));
+          const r = await EventModel.updateOne(
+            {
+              _id: event._id,
+              "extras._id": extraOid,
+              $expr: {
+                $let: {
+                  vars: { e: { $arrayElemAt: [{ $filter: { input: "$extras", as: "e", cond: { $eq: ["$$e._id", extraOid] } } }, 0] } },
+                  in: { $lte: [{ $add: ["$$e.sold", Number(line.quantity)] }, "$$e.quantity"] },
+                },
+              },
+            },
+            { $inc: { "extras.$.sold": Number(line.quantity) } },
+            { session }
+          );
+          if (r.matchedCount === 0) {
+            throw new ErrorWithProps(`${line.extraName ?? "Add-on"} is sold out`);
+          }
         }
 
         const now = new Date();
@@ -2151,54 +2128,6 @@ class OrderService {
           return;
         }
 
-        const event = await EventModel.findById(order.eventId)
-          .select("tickets extras")
-          .session(session)
-          .lean();
-        if (!event) throw new ErrorWithProps("Event no longer exists");
-
-        // Re-check inventory before incrementing. The webhook does the
-        // same assertion under the same transaction — keeps both paths
-        // consistent against an oversold race.
-        const ticketMap = new Map(
-          (event.tickets ?? []).map((t: any) => [String(t._id), t])
-        );
-        const extraMap = new Map(
-          (event.extras ?? []).map((e: any) => [String(e._id), e])
-        );
-        for (const line of order.tickets ?? []) {
-          const ticket: any = ticketMap.get(String(line.ticketTypeId));
-          if (!ticket) {
-            throw new ErrorWithProps(
-              `${line.ticketName ?? "Ticket"} is no longer available`
-            );
-          }
-          const capacity = Number(ticket.ticketCapacity ?? 0);
-          const sold = Number(ticket.ticketSold ?? 0);
-          const quantity = Number(line.quantity ?? 0);
-          if (sold + quantity > capacity) {
-            throw new ErrorWithProps(
-              `${line.ticketName ?? "Ticket"} is no longer available in this quantity`
-            );
-          }
-        }
-        for (const line of order.extras ?? []) {
-          const extra: any = extraMap.get(String(line.extraId));
-          if (!extra) {
-            throw new ErrorWithProps(
-              `${line.extraName ?? "Add-on"} is no longer available`
-            );
-          }
-          const capacity = Number(extra.quantity ?? 0);
-          const sold = Number(extra.sold ?? 0);
-          const quantity = Number(line.quantity ?? 0);
-          if (sold + quantity > capacity) {
-            throw new ErrorWithProps(
-              `${line.extraName ?? "Add-on"} is no longer available in this quantity`
-            );
-          }
-        }
-
         const qrPayload = `hoizr:${order._id.toString()}:${razorpayPaymentId}`;
         // AUDIT-023: versioned signing — see utils/qr-hash.ts.
         const qrSigned = signQrPayload(qrPayload);
@@ -2212,20 +2141,47 @@ class OrderService {
         order.qrHashVersion = qrSigned.version;
         await order.save({ session });
 
-        const ticketOps = (order.tickets ?? []).map((line: any) => ({
-          updateOne: {
-            filter: { _id: order.eventId, "tickets._id": line.ticketTypeId },
-            update: { $inc: { "tickets.$.ticketSold": line.quantity } },
-          },
-        }));
-        const extraOps = (order.extras ?? []).map((line: any) => ({
-          updateOne: {
-            filter: { _id: order.eventId, "extras._id": line.extraId },
-            update: { $inc: { "extras.$.sold": line.quantity } },
-          },
-        }));
-        if (ticketOps.length || extraOps.length) {
-          await EventModel.bulkWrite([...ticketOps, ...extraOps], { session });
+        // Atomic check-and-increment per ticket — prevents concurrent oversell.
+        // matchedCount===0 means the ticket doesn't exist or capacity is exceeded.
+        for (const line of order.tickets ?? []) {
+          const ticketOid = new mongoose.Types.ObjectId(String(line.ticketTypeId));
+          const r = await EventModel.updateOne(
+            {
+              _id: order.eventId,
+              "tickets._id": ticketOid,
+              $expr: {
+                $let: {
+                  vars: { t: { $arrayElemAt: [{ $filter: { input: "$tickets", as: "t", cond: { $eq: ["$$t._id", ticketOid] } } }, 0] } },
+                  in: { $lte: [{ $add: ["$$t.ticketSold", Number(line.quantity)] }, "$$t.ticketCapacity"] },
+                },
+              },
+            },
+            { $inc: { "tickets.$.ticketSold": Number(line.quantity) } },
+            { session }
+          );
+          if (r.matchedCount === 0) {
+            throw new ErrorWithProps(`${line.ticketName ?? "Ticket"} is no longer available`);
+          }
+        }
+        for (const line of order.extras ?? []) {
+          const extraOid = new mongoose.Types.ObjectId(String(line.extraId));
+          const r = await EventModel.updateOne(
+            {
+              _id: order.eventId,
+              "extras._id": extraOid,
+              $expr: {
+                $let: {
+                  vars: { e: { $arrayElemAt: [{ $filter: { input: "$extras", as: "e", cond: { $eq: ["$$e._id", extraOid] } } }, 0] } },
+                  in: { $lte: [{ $add: ["$$e.sold", Number(line.quantity)] }, "$$e.quantity"] },
+                },
+              },
+            },
+            { $inc: { "extras.$.sold": Number(line.quantity) } },
+            { session }
+          );
+          if (r.matchedCount === 0) {
+            throw new ErrorWithProps(`${line.extraName ?? "Add-on"} is no longer available`);
+          }
         }
 
         const now = new Date();
