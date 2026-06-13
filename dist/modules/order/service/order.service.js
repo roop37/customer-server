@@ -5,6 +5,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 const shared_1 = require("@hoizr-technology/shared");
 const configs_cache_1 = require("../../../utils/configs-cache");
+const logger_1 = require("../../../log/logger");
 const typegoose_1 = require("@typegoose/typegoose");
 const coupon_eval_1 = require("./coupon-eval");
 const bullmq_1 = require("bullmq");
@@ -56,6 +57,23 @@ const lifecycleSmsQueue = new bullmq_1.Queue(shared_1.QueueNames.smsQueue, {
         backoff: { type: "exponential", delay: 5000 },
         removeOnComplete: true,
         removeOnFail: 50,
+    },
+});
+// Analytics ingest queue. tracking-server enqueues browser-side events
+// (pageView, cartCreated, checkoutTriggered, …) here after enriching them
+// with IP/UA/device. We enqueue the server-confirmed `orderPlaced` event —
+// the only reliable conversion signal — directly, bypassing tracking-server's
+// enrich (no request IP/UA available here), so we populate the funnel +
+// attribution fields explicitly from the persisted Order. The hoizr-workers
+// analyticsEventsWorker drains this queue into the AnalyticsEvent collection.
+// Best-effort: tracking is never allowed to block or fail an order.
+const analyticsEventsQueue = new bullmq_1.Queue(shared_1.QueueNames.analyticsEventsQueue, {
+    connection: redis_1.redisClient,
+    defaultJobOptions: {
+        attempts: 2,
+        backoff: { type: "exponential", delay: 2000 },
+        removeOnComplete: { age: 60, count: 1000 },
+        removeOnFail: { age: 86400, count: 1000 },
     },
 });
 class OrderService {
@@ -1100,6 +1118,66 @@ class OrderService {
                     .toUpperCase()}. Check email/app for your QR.`,
             });
         }
+        // Server-side conversion event. Every confirmed-order path (free,
+        // paid-webhook, guest, offline) converges here, so this is the single
+        // reliable point to fire `orderPlaced` into the analytics funnel.
+        // Best-effort only — a tracking failure must never throw out of order
+        // confirmation, so the whole block is swallowed.
+        try {
+            await this.enqueueOrderPlacedAnalytics(order);
+        }
+        catch (err) {
+            logger_1.logger.warn({
+                message: "analytics:orderPlaced enqueue failed (non-blocking)",
+                orderId: order?._id?.toString?.(),
+                stack: err?.stack,
+            });
+        }
+    }
+    /**
+     * Enqueue the canonical `orderPlaced` AnalyticsEvent. This BYPASSES the
+     * tracking-server enrich step (we have no request IP / User-Agent here),
+     * so the funnel + attribution fields are populated explicitly from the
+     * persisted Order: the stored `utm` block, the host (`businessId`), and
+     * — when the client captured them at checkout — the browsing `sessionId`
+     * / visitor id, so this conversion stitches onto the same session as the
+     * earlier pageView/cart events. The hoizr-workers analyticsEventsWorker
+     * writes the payload straight to the AnalyticsEvent collection.
+     */
+    async enqueueOrderPlacedAnalytics(order) {
+        const utm = order.utm ?? {};
+        const ticketCount = (order.tickets ?? []).reduce((sum, t) => sum + Number(t?.quantity ?? 0), 0);
+        const isGuest = Boolean(order.guestInfo) && !order.customerId;
+        const payload = {
+            eventType: shared_1.AnalyticsEventType.OrderPlaced,
+            orderId: order._id?.toString?.() ?? String(order._id),
+            eventId: order.eventId?.toString?.() ?? String(order.eventId),
+            hostId: order.businessId?.toString?.() ?? order.businessId,
+            customerId: order.customerId?.toString?.() ?? order.customerId,
+            utmSource: utm.utmSource,
+            utmMedium: utm.utmMedium,
+            utmCampaign: utm.utmCampaign,
+            utmContent: utm.utmContent,
+            utmTerm: utm.utmTerm,
+            app: "customer-server",
+            clientTimestamp: new Date().toISOString(),
+            metadata: {
+                totalAmount: Number(order.totalAmount ?? 0),
+                ticketCount,
+                isGuest,
+            },
+        };
+        // Carry through attribution signals only when the order actually stored
+        // them — keeps the payload clean and avoids writing empty fields.
+        if (order.trafficSource)
+            payload.trafficSource = order.trafficSource;
+        if (order.sessionId)
+            payload.sessionId = order.sessionId;
+        if (order.clientVisitorId)
+            payload.clientVisitorId = order.clientVisitorId;
+        // Use the same job name tracking-server uses so the worker's routing /
+        // dashboards treat customer-server-emitted events identically.
+        await analyticsEventsQueue.add("analytics-event", payload);
     }
     async createOrder(customerId, input) {
         const event = await event_schema_1.EventModel.findOne({
