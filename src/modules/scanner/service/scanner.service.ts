@@ -328,15 +328,31 @@ class ScannerService {
       };
     }
 
+    // Refund policy (2026-06-15): a FULLY-refunded ticket — or one with a full
+    // refund in flight (`fullRefundPending`, set the moment the refund is
+    // triggered) — is NOT valid for entry. Evaluated BEFORE the HMAC check so a
+    // cleared qrCodeHash can never slip through to the check-in claim. Partial
+    // refunds (still PAYMENT_SUCCESS, no fullRefundPending) fall through and are
+    // soft-flagged below.
+    if (
+      existing.orderStatus === OrderStatus.REFUNDED ||
+      existing.paymentMeta?.fullRefundPending === true
+    ) {
+      return {
+        status: ScanResultStatus.REFUNDED,
+        message: "This ticket was refunded and is not valid for entry",
+      };
+    }
+
     // Refund policy (product decision 2026-05-22): refunded orders are
     // still scannable. The scanner shows REFUNDED status alongside the
     // order details so door staff can decide whether to honor the
     // ticket — useful for partial-refund cases (V1 has no per-seat
     // tracking) and for chargebacks/disputes still under review. The
     // status is surfaced; the entry decision is the doorman's.
-    const wasRefunded =
-      existing.orderStatus === OrderStatus.REFUNDED ||
-      Number(existing.refundAmount ?? 0) > 0;
+    // Full refunds are rejected above; only a PARTIAL refund (refundAmount > 0
+    // on a still-PAYMENT_SUCCESS order) reaches here — soft-flag for door staff.
+    const wasRefunded = Number(existing.refundAmount ?? 0) > 0;
 
     if (
       existing.checkedIn ||
@@ -372,12 +388,9 @@ class ScannerService {
       };
     }
 
-    // Scannable states: PAYMENT_SUCCESS, or REFUNDED (per the product
-    // decision above — door staff still gets full details + refund flag).
-    if (
-      existing.orderStatus !== OrderStatus.PAYMENT_SUCCESS &&
-      existing.orderStatus !== OrderStatus.REFUNDED
-    ) {
+    // Scannable state: PAYMENT_SUCCESS only. Full refunds are rejected above;
+    // partial refunds remain PAYMENT_SUCCESS and pass here (soft-flagged later).
+    if (existing.orderStatus !== OrderStatus.PAYMENT_SUCCESS) {
       return {
         status: ScanResultStatus.INVALID_QR,
         message: "Ticket is not in a scannable state",
@@ -400,22 +413,18 @@ class ScannerService {
       };
     }
 
-    // Atomic claim: race-safe against parallel scanners. Only the
-    // first scanner to find the order in [PAYMENT_SUCCESS, REFUNDED]
-    // + !checkedIn wins; everyone else's update misses and we re-read
-    // to classify. For PAYMENT_SUCCESS we flip orderStatus to
-    // CHECKED_IN; for REFUNDED we preserve REFUNDED so the order's
-    // refund history isn't overwritten (handled via the aggregation
-    // pipeline update so it's still a single atomic op).
+    // Atomic claim: race-safe against parallel scanners. Only the first
+    // scanner to find the order in PAYMENT_SUCCESS + !checkedIn wins; everyone
+    // else's update misses and we re-read to classify. Refunded / in-flight
+    // orders are already rejected above, so only a genuine paid ticket reaches
+    // here and is flipped to CHECKED_IN.
     // (`now` is declared at the top of scanTicket for the start-date check.)
     const claimed = await OrderModel.findOneAndUpdate(
       {
         _id: parsed.orderId,
         eventId: ctx.scannerEventId,
         razorpayPaymentId: parsed.paymentId,
-        orderStatus: {
-          $in: [OrderStatus.PAYMENT_SUCCESS, OrderStatus.REFUNDED],
-        },
+        orderStatus: { $in: [OrderStatus.PAYMENT_SUCCESS] },
         checkedIn: false,
         isDeleted: false,
       },
