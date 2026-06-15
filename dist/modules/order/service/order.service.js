@@ -676,13 +676,13 @@ class OrderService {
                 order.qrHashVersion = qr.version;
                 await order.save({ session });
                 for (const line of orderTickets) {
-                    const ticketOid = new typegoose_1.mongoose.Types.ObjectId(String(line.ticketTypeId));
+                    const ticketId = String(line.ticketTypeId);
                     const r = await event_schema_1.EventModel.updateOne({
                         _id: event._id,
-                        "tickets._id": ticketOid,
+                        "tickets._id": ticketId,
                         $expr: {
                             $let: {
-                                vars: { t: { $arrayElemAt: [{ $filter: { input: "$tickets", as: "t", cond: { $eq: ["$$t._id", ticketOid] } } }, 0] } },
+                                vars: { t: { $arrayElemAt: [{ $filter: { input: "$tickets", as: "t", cond: { $eq: ["$$t._id", ticketId] } } }, 0] } },
                                 in: { $lte: [{ $add: ["$$t.ticketSold", Number(line.quantity)] }, "$$t.ticketCapacity"] },
                             },
                         },
@@ -692,13 +692,13 @@ class OrderService {
                     }
                 }
                 for (const line of orderExtras) {
-                    const extraOid = new typegoose_1.mongoose.Types.ObjectId(String(line.extraId));
+                    const extraId = String(line.extraId);
                     const r = await event_schema_1.EventModel.updateOne({
                         _id: event._id,
-                        "extras._id": extraOid,
+                        "extras._id": extraId,
                         $expr: {
                             $let: {
-                                vars: { e: { $arrayElemAt: [{ $filter: { input: "$extras", as: "e", cond: { $eq: ["$$e._id", extraOid] } } }, 0] } },
+                                vars: { e: { $arrayElemAt: [{ $filter: { input: "$extras", as: "e", cond: { $eq: ["$$e._id", extraId] } } }, 0] } },
                                 in: { $lte: [{ $add: ["$$e.sold", Number(line.quantity)] }, "$$e.quantity"] },
                             },
                         },
@@ -1024,13 +1024,13 @@ class OrderService {
                 order.qrHashVersion = qr.version;
                 await order.save({ session });
                 for (const line of orderTickets) {
-                    const ticketOid = new typegoose_1.mongoose.Types.ObjectId(String(line.ticketTypeId));
+                    const ticketId = String(line.ticketTypeId);
                     const r = await event_schema_1.EventModel.updateOne({
                         _id: event._id,
-                        "tickets._id": ticketOid,
+                        "tickets._id": ticketId,
                         $expr: {
                             $let: {
-                                vars: { t: { $arrayElemAt: [{ $filter: { input: "$tickets", as: "t", cond: { $eq: ["$$t._id", ticketOid] } } }, 0] } },
+                                vars: { t: { $arrayElemAt: [{ $filter: { input: "$tickets", as: "t", cond: { $eq: ["$$t._id", ticketId] } } }, 0] } },
                                 in: { $lte: [{ $add: ["$$t.ticketSold", Number(line.quantity)] }, "$$t.ticketCapacity"] },
                             },
                         },
@@ -1040,13 +1040,13 @@ class OrderService {
                     }
                 }
                 for (const line of orderExtras) {
-                    const extraOid = new typegoose_1.mongoose.Types.ObjectId(String(line.extraId));
+                    const extraId = String(line.extraId);
                     const r = await event_schema_1.EventModel.updateOne({
                         _id: event._id,
-                        "extras._id": extraOid,
+                        "extras._id": extraId,
                         $expr: {
                             $let: {
-                                vars: { e: { $arrayElemAt: [{ $filter: { input: "$extras", as: "e", cond: { $eq: ["$$e._id", extraOid] } } }, 0] } },
+                                vars: { e: { $arrayElemAt: [{ $filter: { input: "$extras", as: "e", cond: { $eq: ["$$e._id", extraId] } } }, 0] } },
                                 in: { $lte: [{ $add: ["$$e.sold", Number(line.quantity)] }, "$$e.quantity"] },
                             },
                         },
@@ -1615,13 +1615,13 @@ class OrderService {
                 // Atomic check-and-increment per ticket — prevents concurrent oversell.
                 // matchedCount===0 means the ticket doesn't exist or capacity is exceeded.
                 for (const line of order.tickets ?? []) {
-                    const ticketOid = new typegoose_1.mongoose.Types.ObjectId(String(line.ticketTypeId));
+                    const ticketId = String(line.ticketTypeId);
                     const r = await event_schema_1.EventModel.updateOne({
                         _id: order.eventId,
-                        "tickets._id": ticketOid,
+                        "tickets._id": ticketId,
                         $expr: {
                             $let: {
-                                vars: { t: { $arrayElemAt: [{ $filter: { input: "$tickets", as: "t", cond: { $eq: ["$$t._id", ticketOid] } } }, 0] } },
+                                vars: { t: { $arrayElemAt: [{ $filter: { input: "$tickets", as: "t", cond: { $eq: ["$$t._id", ticketId] } } }, 0] } },
                                 in: { $lte: [{ $add: ["$$t.ticketSold", Number(line.quantity)] }, "$$t.ticketCapacity"] },
                             },
                         },
@@ -1631,13 +1631,13 @@ class OrderService {
                     }
                 }
                 for (const line of order.extras ?? []) {
-                    const extraOid = new typegoose_1.mongoose.Types.ObjectId(String(line.extraId));
+                    const extraId = String(line.extraId);
                     const r = await event_schema_1.EventModel.updateOne({
                         _id: order.eventId,
-                        "extras._id": extraOid,
+                        "extras._id": extraId,
                         $expr: {
                             $let: {
-                                vars: { e: { $arrayElemAt: [{ $filter: { input: "$extras", as: "e", cond: { $eq: ["$$e._id", extraOid] } } }, 0] } },
+                                vars: { e: { $arrayElemAt: [{ $filter: { input: "$extras", as: "e", cond: { $eq: ["$$e._id", extraId] } } }, 0] } },
                                 in: { $lte: [{ $add: ["$$e.sold", Number(line.quantity)] }, "$$e.quantity"] },
                             },
                         },
