@@ -1607,7 +1607,7 @@ class OrderService {
         Number(ref.ticketCapacity ?? 0) - Number(ref.ticketSold ?? 0);
       if (line.quantity > remainingCapacity) {
         throw new ErrorWithProps(
-          `${ref.ticketName} is no longer available in this quantity`
+          `"${ref.ticketName}" is in high demand right now and the quantity you picked was just snapped up. Please wait a moment and try again.`
         );
       }
       return {
