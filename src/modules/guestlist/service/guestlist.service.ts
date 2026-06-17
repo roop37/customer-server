@@ -207,11 +207,40 @@ class GuestlistService {
         .select("title eventFlyer startDate city location")
         .lean<any[]>(),
       GuestlistModel.find({ _id: { $in: guestlistIds } })
-        .select("contributorName")
+        .select("contributorName code")
         .lean<any[]>(),
     ]);
     const eventMap = new Map(events.map((e) => [String(e._id), e]));
     const configMap = new Map(configs.map((c) => [String(c._id), c]));
+
+    // Lazy QR issuance: an entry approved in approval-mode is ACCEPTED but has
+    // no QR yet (signing lives only here). Mint + persist on first view so the
+    // golden ticket is always scannable.
+    const updates: Promise<unknown>[] = [];
+    for (const e of entries) {
+      if (e.status === GuestlistEntryStatus.ACCEPTED && !e.qrCodeData) {
+        const cfg = configMap.get(String(e.guestlistId));
+        if (cfg?.code) {
+          const qr = generateGuestlistQrPayload(String(e._id), cfg.code);
+          e.qrCodeData = qr.payload;
+          e.qrCodeHash = qr.hash;
+          e.qrHashVersion = qr.version;
+          updates.push(
+            GuestlistEntryModel.updateOne(
+              { _id: e._id, qrCodeData: { $in: [null, undefined] } },
+              {
+                $set: {
+                  qrCodeData: qr.payload,
+                  qrCodeHash: qr.hash,
+                  qrHashVersion: qr.version,
+                },
+              }
+            )
+          );
+        }
+      }
+    }
+    if (updates.length) await Promise.all(updates);
 
     return entries.map((e) =>
       this.toTicketView(
