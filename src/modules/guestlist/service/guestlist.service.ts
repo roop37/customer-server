@@ -1,6 +1,7 @@
 import { GuestlistEntryStatus } from "@hoizr-technology/shared";
 import { ErrorWithProps } from "mercurius";
 import { generateGuestlistQrPayload } from "../../../utils/guestlist-qr";
+import { enqueueLifecycleEmail } from "../../../utils/lifecycle.queue";
 import { CustomerModel } from "../../customer/schema/customer.schema";
 import { EventModel } from "../../event/schema/event.schema";
 import {
@@ -222,6 +223,22 @@ class GuestlistService {
       }
       throw e;
     }
+
+    // Auto-accepted → confirm by email. (Approval-mode joins are emailed
+    // when the organizer approves, from main-server.) Best-effort.
+    if (status === GuestlistEntryStatus.ACCEPTED && customer?.email) {
+      try {
+        await enqueueLifecycleEmail(
+          "GUESTLIST_ACCEPTED" as any,
+          customer.email,
+          entry.guestName ?? undefined,
+          { eventTitle: event.title ?? "" }
+        );
+      } catch {
+        // non-fatal
+      }
+    }
+
     return this.toTicketView(entry.toObject(), event, config);
   }
 
