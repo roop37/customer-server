@@ -1,9 +1,15 @@
-import { EventStatus, OrderStatus } from "@hoizr-technology/shared";
+import {
+  EventStatus,
+  GuestlistEntryStatus,
+  OrderStatus,
+} from "@hoizr-technology/shared";
 import { compare } from "bcrypt";
 import crypto from "crypto";
 import { ErrorWithProps } from "mercurius";
 import Context from "../../../types/context.type";
 import { verifyQrHashVersioned } from "../../../utils/qr-hash";
+import { parseGuestlistQrPayload } from "../../../utils/guestlist-qr";
+import { GuestlistEntryModel } from "../../guestlist/schema/guestlist.schema";
 import {
   JwtScannerPayload,
   createScannerAuthTokens,
@@ -208,6 +214,145 @@ class ScannerService {
     return verifyQrHashVersioned(qrPayload, storedHash, qrHashVersion);
   }
 
+  private guestlistOrderView(entry: any) {
+    return {
+      orderId: String(entry._id),
+      customerName: entry.guestName ?? "Guest",
+      customerPhone: entry.guestPhone ?? undefined,
+      tickets: [{ ticketName: "Guestlist", quantity: 1 }],
+      extras: [] as { extraName: string; quantity: number }[],
+      totalTickets: 1,
+      checkedInAt: entry.checkedInAt ?? new Date(),
+    };
+  }
+
+  /**
+   * Check in a guestlist golden ticket. Mirrors the order-scan event gates
+   * (cancelled / not-started / ended), validates the entry's own QR HMAC,
+   * then atomically claims the check-in.
+   */
+  private async scanGuestlistEntry(
+    parsed: { entryId: string; code: string },
+    qrPayload: string,
+    ctx: Context,
+    asOf: Date
+  ): Promise<ScanTicketResponse> {
+    const event = await EventModel.findOne({
+      _id: ctx.scannerEventId,
+      isDeleted: false,
+    })
+      .select("startDate endDate status")
+      .lean();
+    if (!event) {
+      return {
+        status: ScanResultStatus.ORDER_NOT_FOUND,
+        message: "Event not found",
+      };
+    }
+    if (event.status === EventStatus.CANCELLED) {
+      return {
+        status: ScanResultStatus.EVENT_ENDED,
+        message: "Event has been cancelled — entry is no longer valid",
+      };
+    }
+
+    const now = asOf;
+    const SCAN_GRACE_BEFORE_START_MS = 2 * 60 * 60 * 1000;
+    if (
+      event.startDate &&
+      now.getTime() <
+        new Date(event.startDate).getTime() - SCAN_GRACE_BEFORE_START_MS
+    ) {
+      return {
+        status: ScanResultStatus.EVENT_NOT_STARTED,
+        message: "Doors haven't opened yet",
+      };
+    }
+    if (event.status !== EventStatus.PUBLISHED) {
+      const endsAt = event.endDate ? new Date(event.endDate) : null;
+      if (endsAt) {
+        const cutoff = new Date(endsAt);
+        cutoff.setHours(cutoff.getHours() + 24);
+        if (cutoff < now) {
+          return {
+            status: ScanResultStatus.EVENT_ENDED,
+            message: "Event check-in window has closed",
+          };
+        }
+      }
+    }
+
+    const entry = await GuestlistEntryModel.findById(parsed.entryId).lean();
+    if (!entry || !entry.qrCodeHash) {
+      return {
+        status: ScanResultStatus.ORDER_NOT_FOUND,
+        message: "Guest pass not found for this QR code",
+      };
+    }
+    if (String(entry.eventId) !== String(ctx.scannerEventId)) {
+      return {
+        status: ScanResultStatus.WRONG_EVENT,
+        message: "This guest pass is for a different event",
+      };
+    }
+    if (entry.status === GuestlistEntryStatus.REVOKED) {
+      return {
+        status: ScanResultStatus.CANCELLED,
+        message: "Guestlist access was revoked",
+      };
+    }
+    if (entry.status !== GuestlistEntryStatus.ACCEPTED) {
+      return {
+        status: ScanResultStatus.INVALID_QR,
+        message: "Guest pass is not active yet",
+      };
+    }
+    // HMAC verify before the database claim — a tampered QR never flips state.
+    if (!verifyQrHashVersioned(qrPayload, entry.qrCodeHash, entry.qrHashVersion)) {
+      return {
+        status: ScanResultStatus.INVALID_QR,
+        message: "QR code signature is invalid",
+      };
+    }
+    if (entry.checkedIn) {
+      return {
+        status: ScanResultStatus.ALREADY_CHECKED_IN,
+        message: `Already checked in at ${
+          entry.checkedInAt?.toLocaleString() ?? "earlier"
+        }`,
+        order: this.guestlistOrderView(entry),
+      };
+    }
+
+    // Atomic claim — race-safe against parallel scanners.
+    const claimed = await GuestlistEntryModel.findOneAndUpdate(
+      {
+        _id: entry._id,
+        status: GuestlistEntryStatus.ACCEPTED,
+        checkedIn: false,
+      },
+      { $set: { checkedIn: true, checkedInAt: now } },
+      { new: true }
+    ).lean();
+    if (!claimed) {
+      return {
+        status: ScanResultStatus.ALREADY_CHECKED_IN,
+        message: "Already checked in moments ago",
+      };
+    }
+
+    await ScannerUserModel.updateOne(
+      { _id: ctx.scannerId },
+      { $inc: { totalScanned: 1 } }
+    );
+
+    return {
+      status: ScanResultStatus.OK,
+      message: "Guestlist pass valid. Welcome in!",
+      order: this.guestlistOrderView(claimed),
+    };
+  }
+
   async scanTicket(
     input: ScanTicketInput,
     ctx: Context,
@@ -221,6 +366,18 @@ class ScannerService {
         status: ScanResultStatus.SCANNER_INACTIVE,
         message: "Scanner session is not valid",
       };
+    }
+
+    // Guestlist golden tickets use a distinct QR (`hoizr-gl:…`) + their own
+    // collection — route them before the order parse.
+    const guestlistParsed = parseGuestlistQrPayload(input.qrCodeData);
+    if (guestlistParsed) {
+      return this.scanGuestlistEntry(
+        guestlistParsed,
+        input.qrCodeData,
+        ctx,
+        asOf
+      );
     }
 
     const parsed = this.parseQrPayload(input.qrCodeData);
