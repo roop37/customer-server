@@ -1013,6 +1013,12 @@ class OrderService {
     if (!input.tickets?.length && !input.extras?.length) {
       throw new ErrorWithProps("Select at least one ticket");
     }
+    // Add-ons can't be bought on their own — require at least one ticket.
+    if (!input.tickets?.length && (input.extras?.length ?? 0) > 0) {
+      throw new ErrorWithProps(
+        "Add-ons can only be purchased together with a ticket. Add at least one ticket to continue."
+      );
+    }
 
     const resolved = await resolveCustomerForOrder({
       phone: input.phone,
@@ -1546,6 +1552,13 @@ class OrderService {
     const stored = await this.cart.readStoredCart(customerId, input.eventId);
     if (!stored || (!stored.tickets.length && !stored.extras.length)) {
       throw new ErrorWithProps("Cart is empty or expired");
+    }
+    // Add-ons are not standalone products — they can only be bought
+    // alongside a ticket. Block an extras-only checkout.
+    if (stored.tickets.length === 0 && stored.extras.length > 0) {
+      throw new ErrorWithProps(
+        "Add-ons can only be purchased together with a ticket. Add at least one ticket to continue."
+      );
     }
     const reservedAt = this.assertCartReservationActive(stored.reservedAt);
     this.assertEventBookable(event);
