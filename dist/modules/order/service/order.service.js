@@ -744,6 +744,10 @@ class OrderService {
         if (!input.tickets?.length && !input.extras?.length) {
             throw new mercurius_1.ErrorWithProps("Select at least one ticket");
         }
+        // Add-ons can't be bought on their own — require at least one ticket.
+        if (!input.tickets?.length && (input.extras?.length ?? 0) > 0) {
+            throw new mercurius_1.ErrorWithProps("Add-ons can only be purchased together with a ticket. Add at least one ticket to continue.");
+        }
         const resolved = await (0, customer_resolution_service_1.resolveCustomerForOrder)({
             phone: input.phone,
             email: input.email,
@@ -1185,6 +1189,11 @@ class OrderService {
         if (!stored || (!stored.tickets.length && !stored.extras.length)) {
             throw new mercurius_1.ErrorWithProps("Cart is empty or expired");
         }
+        // Add-ons are not standalone products — they can only be bought
+        // alongside a ticket. Block an extras-only checkout.
+        if (stored.tickets.length === 0 && stored.extras.length > 0) {
+            throw new mercurius_1.ErrorWithProps("Add-ons can only be purchased together with a ticket. Add at least one ticket to continue.");
+        }
         const reservedAt = this.assertCartReservationActive(stored.reservedAt);
         this.assertEventBookable(event);
         const ticketMap = new Map((event.tickets ?? []).map((t) => [String(t._id), t]));
@@ -1230,7 +1239,7 @@ class OrderService {
             // between cart-set and order-create.
             const remainingCapacity = Number(ref.ticketCapacity ?? 0) - Number(ref.ticketSold ?? 0);
             if (line.quantity > remainingCapacity) {
-                throw new mercurius_1.ErrorWithProps(`${ref.ticketName} is no longer available in this quantity`);
+                throw new mercurius_1.ErrorWithProps(`"${ref.ticketName}" is in high demand right now and the quantity you picked was just snapped up. Please wait a moment and try again.`);
             }
             return {
                 ticketTypeId: line.ticketId,
