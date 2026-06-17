@@ -6,6 +6,7 @@ import { EventModel } from "../../event/schema/event.schema";
 import {
   GuestlistJoinView,
   GuestlistTicketView,
+  PublicGuestlistView,
 } from "../interfaces/guestlist.objects";
 import {
   GuestlistEntryModel,
@@ -46,6 +47,42 @@ class GuestlistService {
       qrCodeData: entry.qrCodeData ?? undefined,
       checkedIn: !!entry.checkedIn,
     };
+  }
+
+  /** Public guestlists for an event — shown on the event page when a host or
+   *  artist opts their list in (isPublic). Private lists are join-by-link only. */
+  async getPublicGuestlists(eventId: string): Promise<PublicGuestlistView[]> {
+    if (!eventId) return [];
+    const event = await EventModel.findById(eventId)
+      .select("guestlistEnabled")
+      .lean<any>();
+    if (!event || !event.guestlistEnabled) return [];
+
+    const lists = await GuestlistModel.find({
+      eventId,
+      isPublic: true,
+      isActive: true,
+    })
+      .sort({ createdAt: 1 })
+      .lean<any[]>();
+    if (!lists.length) return [];
+
+    const ids = lists.map((l) => String(l._id));
+    const counts = await GuestlistEntryModel.aggregate([
+      { $match: { guestlistId: { $in: ids }, status: { $in: ACTIVE_STATUSES } } },
+      { $group: { _id: "$guestlistId", n: { $sum: 1 } } },
+    ]);
+    const countMap = new Map<string, number>(
+      counts.map((c: any) => [String(c._id), c.n])
+    );
+
+    return lists.map((l) => ({
+      guestlistId: String(l._id),
+      code: l.code,
+      contributorName: l.contributorName ?? undefined,
+      contributorType: l.contributorType,
+      isFull: l.cap != null && (countMap.get(String(l._id)) ?? 0) >= l.cap,
+    }));
   }
 
   /** Join-link landing — what the customer sees before joining. */

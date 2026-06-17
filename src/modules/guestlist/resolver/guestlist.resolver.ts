@@ -11,11 +11,20 @@ import Context from "../../../types/context.type";
 import {
   GuestlistJoinView,
   GuestlistTicketView,
+  PublicGuestlistView,
 } from "../interfaces/guestlist.objects";
 import { guestlistService } from "../service/guestlist.service";
 
 @Resolver()
 export class GuestlistResolver {
+  /** Public guestlists shown on an event page (opt-in). No auth needed. */
+  @Query(() => [PublicGuestlistView])
+  async eventPublicGuestlists(
+    @Arg("eventId") eventId: string
+  ): Promise<PublicGuestlistView[]> {
+    return guestlistService.getPublicGuestlists(eventId);
+  }
+
   /** Join-link preview. Works logged-out; `alreadyJoined` needs a session. */
   @Query(() => GuestlistJoinView)
   async guestlistByCode(

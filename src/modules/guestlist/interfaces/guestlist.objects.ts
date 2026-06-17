@@ -43,6 +43,25 @@ export class GuestlistJoinView {
   myEntryStatus?: GuestlistEntryStatus;
 }
 
+/** A public guestlist shown on the event page (opt-in via isPublic). */
+@ObjectType()
+export class PublicGuestlistView {
+  @Field()
+  guestlistId: string;
+
+  @Field()
+  code: string;
+
+  @Field({ nullable: true })
+  contributorName?: string;
+
+  @Field()
+  contributorType: string;
+
+  @Field()
+  isFull: boolean;
+}
+
 /** A customer's golden ticket. */
 @ObjectType()
 export class GuestlistTicketView {
