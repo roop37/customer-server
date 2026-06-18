@@ -243,11 +243,22 @@ class GuestlistService {
     }
     const event = await EventModel.findById(config.eventId)
       .select(
-        "title eventFlyer startDate city location guestlistEnabled guestlistAutoAccept"
+        "title eventFlyer startDate endDate status city location guestlistEnabled guestlistAutoAccept"
       )
       .lean<any>();
     if (!event || !event.guestlistEnabled) {
       throw new ErrorWithProps("The guestlist isn't open for this event.");
+    }
+    if (event.status === EventStatus.CANCELLED) {
+      throw new ErrorWithProps("This event was cancelled.");
+    }
+    // Block joins once the event has ended (status flipped to Completed by the
+    // cron, or endDate already passed) — mirrors the cart's end-date guard.
+    if (
+      event.status === EventStatus.COMPLETED ||
+      (event.endDate && new Date(event.endDate).getTime() < Date.now())
+    ) {
+      throw new ErrorWithProps("This event has already ended.");
     }
     if (event.startDate && new Date(event.startDate).getTime() < Date.now()) {
       throw new ErrorWithProps("This event has already started.");
