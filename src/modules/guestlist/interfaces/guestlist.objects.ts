@@ -62,6 +62,38 @@ export class PublicGuestlistView {
   isFull: boolean;
 }
 
+/**
+ * A host's public guestlist shown on the host/venue detail page — one row per
+ * (public list × upcoming event). Carries the event info so the venue page can
+ * render which event the list is for and link to the join code.
+ */
+@ObjectType()
+export class VenuePublicGuestlistView {
+  @Field()
+  guestlistId: string;
+
+  @Field()
+  code: string;
+
+  @Field({ nullable: true })
+  contributorName?: string;
+
+  @Field()
+  isFull: boolean;
+
+  @Field()
+  eventId: string;
+
+  @Field({ nullable: true })
+  eventTitle?: string;
+
+  @Field({ nullable: true })
+  eventFlyer?: string;
+
+  @Field({ nullable: true })
+  eventDate?: string;
+}
+
 /** A customer's golden ticket. */
 @ObjectType()
 export class GuestlistTicketView {
