@@ -1,13 +1,19 @@
-import { GuestlistEntryStatus } from "@hoizr-technology/shared";
+import {
+  EventStatus,
+  GuestlistContributorType,
+  GuestlistEntryStatus,
+} from "@hoizr-technology/shared";
 import { ErrorWithProps } from "mercurius";
 import { generateGuestlistQrPayload } from "../../../utils/guestlist-qr";
 import { enqueueLifecycleEmail } from "../../../utils/lifecycle.queue";
 import { CustomerModel } from "../../customer/schema/customer.schema";
 import { EventModel } from "../../event/schema/event.schema";
+import { VenueHostModel } from "../../venue/schema/venue.schema";
 import {
   GuestlistJoinView,
   GuestlistTicketView,
   PublicGuestlistView,
+  VenuePublicGuestlistView,
 } from "../interfaces/guestlist.objects";
 import {
   GuestlistEntryModel,
@@ -55,9 +61,23 @@ class GuestlistService {
   async getPublicGuestlists(eventId: string): Promise<PublicGuestlistView[]> {
     if (!eventId) return [];
     const event = await EventModel.findById(eventId)
-      .select("guestlistEnabled")
+      .select("guestlistEnabled hostId")
       .lean<any>();
     if (!event || !event.guestlistEnabled) return [];
+
+    // The public guestlist view is disabled while the host is still onboarding.
+    // Same gate the venue module uses (onboardingCompleted + active). The
+    // private join-by-link path (getGuestlistByCode) is intentionally NOT gated
+    // — a shared invite link still works during onboarding.
+    const host = await VenueHostModel.findOne({
+      _id: event.hostId,
+      onboardingCompleted: true,
+      isActive: true,
+      isDeleted: { $ne: true },
+    })
+      .select("_id")
+      .lean<any>();
+    if (!host) return [];
 
     const lists = await GuestlistModel.find({
       eventId,
@@ -84,6 +104,78 @@ class GuestlistService {
       contributorType: l.contributorType,
       isFull: l.cap != null && (countMap.get(String(l._id)) ?? 0) >= l.cap,
     }));
+  }
+
+  /**
+   * A host's PUBLIC guestlists across their upcoming published events — shown
+   * on the host/venue detail page (the other entry point besides the shared
+   * link). Same onboarding gate as the public event view: nothing surfaces for
+   * a host still onboarding. Scoped to the host's OWN lists (contributorType
+   * HOST) — collaborator/artist lists stay on their own surfaces.
+   */
+  async getVenuePublicGuestlists(
+    hostId: string
+  ): Promise<VenuePublicGuestlistView[]> {
+    if (!hostId) return [];
+
+    const host = await VenueHostModel.findOne({
+      _id: hostId,
+      onboardingCompleted: true,
+      isActive: true,
+      isDeleted: { $ne: true },
+    })
+      .select("_id")
+      .lean<any>();
+    if (!host) return [];
+
+    const now = new Date();
+    const events = await EventModel.find({
+      hostId,
+      isDeleted: false,
+      guestlistEnabled: true,
+      status: EventStatus.PUBLISHED,
+      $or: [{ endDate: { $gte: now } }, { startDate: { $gte: now } }],
+    })
+      .select("title eventFlyer startDate")
+      .sort({ startDate: 1 })
+      .lean<any[]>();
+    if (!events.length) return [];
+
+    const eventMap = new Map(events.map((e) => [String(e._id), e]));
+    const lists = await GuestlistModel.find({
+      eventId: { $in: events.map((e) => String(e._id)) },
+      contributorType: GuestlistContributorType.HOST,
+      isPublic: true,
+      isActive: true,
+    })
+      .sort({ createdAt: 1 })
+      .lean<any[]>();
+    if (!lists.length) return [];
+
+    const ids = lists.map((l) => String(l._id));
+    const counts = await GuestlistEntryModel.aggregate([
+      { $match: { guestlistId: { $in: ids }, status: { $in: ACTIVE_STATUSES } } },
+      { $group: { _id: "$guestlistId", n: { $sum: 1 } } },
+    ]);
+    const countMap = new Map<string, number>(
+      counts.map((c: any) => [String(c._id), c.n])
+    );
+
+    return lists.map((l) => {
+      const ev = eventMap.get(String(l.eventId));
+      return {
+        guestlistId: String(l._id),
+        code: l.code,
+        contributorName: l.contributorName ?? undefined,
+        isFull: l.cap != null && (countMap.get(String(l._id)) ?? 0) >= l.cap,
+        eventId: String(l.eventId),
+        eventTitle: ev?.title,
+        eventFlyer: ev?.eventFlyer ?? undefined,
+        eventDate: ev?.startDate
+          ? new Date(ev.startDate).toISOString()
+          : undefined,
+      };
+    });
   }
 
   /** Join-link landing — what the customer sees before joining. */

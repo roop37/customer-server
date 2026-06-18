@@ -12,6 +12,7 @@ import {
   GuestlistJoinView,
   GuestlistTicketView,
   PublicGuestlistView,
+  VenuePublicGuestlistView,
 } from "../interfaces/guestlist.objects";
 import { guestlistService } from "../service/guestlist.service";
 
@@ -23,6 +24,15 @@ export class GuestlistResolver {
     @Arg("eventId") eventId: string
   ): Promise<PublicGuestlistView[]> {
     return guestlistService.getPublicGuestlists(eventId);
+  }
+
+  /** A host's public guestlists for upcoming events — for the host/venue
+   *  detail page. No auth; gated on host onboarding inside the service. */
+  @Query(() => [VenuePublicGuestlistView])
+  async venuePublicGuestlists(
+    @Arg("venueId") venueId: string
+  ): Promise<VenuePublicGuestlistView[]> {
+    return guestlistService.getVenuePublicGuestlists(venueId);
   }
 
   /** Join-link preview. Works logged-out; `alreadyJoined` needs a session. */
