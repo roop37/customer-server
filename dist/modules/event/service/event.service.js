@@ -62,13 +62,10 @@ class PublicEventService {
             isDeleted: false,
             isVisible: true,
             adminPaused: { $ne: true },
-            // Only show events whose startDate is still in the future. Once
-            // an event has started (or finished), it disappears from the
-            // listing — customers can't book a show that's already begun.
-            // isComingSoon no longer overrides the date gate; a stale flag
-            // can't surface an already-started event.
-            startDate: { $gte: now },
         };
+        // Conditions ANDed together (date window + free-text search) — kept in
+        // one array so they never collide with each other's $or.
+        const and = [];
         if (input.cityId)
             query.cityId = input.cityId;
         else if (input.city)
@@ -80,30 +77,43 @@ class PublicEventService {
             query.genreTagIds = { $in: input.genreTagIds };
         }
         if (input.startDateFrom || input.startDateTo) {
-            query.startDate = {};
-            if (input.startDateFrom && input.startDateFrom > now) {
-                query.startDate.$gte = input.startDateFrom;
-            }
-            else {
-                query.startDate.$gte = now;
-            }
+            // Explicit user date-range filter overrides the default window.
+            const range = {
+                $gte: input.startDateFrom && input.startDateFrom > now
+                    ? input.startDateFrom
+                    : now,
+            };
             if (input.startDateTo)
-                query.startDate.$lte = input.startDateTo;
+                range.$lte = input.startDateTo;
+            query.startDate = range;
+        }
+        else {
+            // Default window: keep an event in the listing until it ENDS, not
+            // until it starts — an ongoing / multi-day event (started but not
+            // finished) must stay visible and bookable. Fall back to startDate
+            // when the event has no endDate.
+            and.push({
+                $or: [
+                    { endDate: { $gte: now } },
+                    { endDate: null, startDate: { $gte: now } },
+                    { endDate: { $exists: false }, startDate: { $gte: now } },
+                ],
+            });
         }
         if (input.search) {
             const term = input.search.trim();
             if (term) {
                 const safeTerm = escapeRegex(term);
-                query.$and = [
-                    {
-                        $or: [
-                            { title: { $regex: safeTerm, $options: "i" } },
-                            { description: { $regex: safeTerm, $options: "i" } },
-                        ],
-                    },
-                ];
+                and.push({
+                    $or: [
+                        { title: { $regex: safeTerm, $options: "i" } },
+                        { description: { $regex: safeTerm, $options: "i" } },
+                    ],
+                });
             }
         }
+        if (and.length)
+            query.$and = and;
         const [events, total] = await Promise.all([
             event_schema_1.EventModel.find(query)
                 .sort({ isHighDemand: -1, startDate: 1, createdAt: -1 })
@@ -305,11 +315,35 @@ class PublicEventService {
             startDate: 1,
         };
         const [upcoming, past] = await Promise.all([
-            event_schema_1.EventModel.find({ ...baseFilter, startDate: { $gte: now } }, projection)
+            event_schema_1.EventModel.find({
+                ...baseFilter,
+                // "Upcoming" = not yet ended (ongoing events count as upcoming).
+                $and: [
+                    {
+                        $or: [
+                            { endDate: { $gte: now } },
+                            { endDate: null, startDate: { $gte: now } },
+                            { endDate: { $exists: false }, startDate: { $gte: now } },
+                        ],
+                    },
+                ],
+            }, projection)
                 .sort({ startDate: 1 })
                 .limit(limitPerBucket)
                 .lean(),
-            event_schema_1.EventModel.find({ ...baseFilter, startDate: { $lt: now } }, projection)
+            event_schema_1.EventModel.find({
+                ...baseFilter,
+                // "Past" = already ended.
+                $and: [
+                    {
+                        $or: [
+                            { endDate: { $lt: now } },
+                            { endDate: null, startDate: { $lt: now } },
+                            { endDate: { $exists: false }, startDate: { $lt: now } },
+                        ],
+                    },
+                ],
+            }, projection)
                 .sort({ startDate: -1 })
                 .limit(limitPerBucket)
                 .lean(),
@@ -346,11 +380,35 @@ class PublicEventService {
             startDate: 1,
         };
         const [upcoming, past] = await Promise.all([
-            event_schema_1.EventModel.find({ ...baseFilter, startDate: { $gte: now } }, projection)
+            event_schema_1.EventModel.find({
+                ...baseFilter,
+                // "Upcoming" = not yet ended (ongoing events count as upcoming).
+                $and: [
+                    {
+                        $or: [
+                            { endDate: { $gte: now } },
+                            { endDate: null, startDate: { $gte: now } },
+                            { endDate: { $exists: false }, startDate: { $gte: now } },
+                        ],
+                    },
+                ],
+            }, projection)
                 .sort({ startDate: 1 })
                 .limit(limitPerBucket)
                 .lean(),
-            event_schema_1.EventModel.find({ ...baseFilter, startDate: { $lt: now } }, projection)
+            event_schema_1.EventModel.find({
+                ...baseFilter,
+                // "Past" = already ended.
+                $and: [
+                    {
+                        $or: [
+                            { endDate: { $lt: now } },
+                            { endDate: null, startDate: { $lt: now } },
+                            { endDate: { $exists: false }, startDate: { $lt: now } },
+                        ],
+                    },
+                ],
+            }, projection)
                 .sort({ startDate: -1 })
                 .limit(limitPerBucket)
                 .lean(),
