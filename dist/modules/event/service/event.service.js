@@ -152,7 +152,11 @@ class PublicEventService {
         if (!event)
             return { artists: [], organizers: [] };
         // ---------- Artists --------------------------------------------------
-        const lineup = (event.lineup ?? []).filter(Boolean);
+        // Rejected lineup artists are removed from the public event page.
+        // (null status == accepted; only an explicit "REJECTED" hides them.)
+        const lineup = (event.lineup ?? [])
+            .filter(Boolean)
+            .filter((l) => l?.status !== "REJECTED");
         const artistLinkIds = lineup
             .map((l) => l.artistLinkId)
             .filter((id) => Boolean(id) && mongoose_1.Types.ObjectId.isValid(id));

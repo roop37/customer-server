@@ -175,7 +175,11 @@ class PublicEventService {
     if (!event) return { artists: [], organizers: [] };
 
     // ---------- Artists --------------------------------------------------
-    const lineup = (event.lineup ?? []).filter(Boolean);
+    // Rejected lineup artists are removed from the public event page.
+    // (null status == accepted; only an explicit "REJECTED" hides them.)
+    const lineup = (event.lineup ?? [])
+      .filter(Boolean)
+      .filter((l: any) => l?.status !== "REJECTED");
     const artistLinkIds = lineup
       .map((l) => l.artistLinkId)
       .filter((id): id is string => Boolean(id) && Types.ObjectId.isValid(id));
