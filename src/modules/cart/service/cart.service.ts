@@ -1,6 +1,9 @@
 import {
+  ALL_DAYS_TICKET,
   ConfigTypeEnum,
+  daySalesClosed,
   EventStatus,
+  isMultiDay,
   OrderStatus,
   VerificationStatus,
 } from "@hoizr-technology/shared";
@@ -280,6 +283,17 @@ class CartService {
       ) {
         throw new ErrorWithProps(
           `${ticket.ticketName} is no longer on sale`
+        );
+      }
+      // Multi-day: a day's tickets stop selling at that day's start time; an
+      // all-days pass (and any untagged ticket) closes at the earliest day
+      // start. Single-day events skip this entirely.
+      if (
+        isMultiDay(event as any) &&
+        daySalesClosed(event as any, ticket.dayId ?? ALL_DAYS_TICKET, now)
+      ) {
+        throw new ErrorWithProps(
+          `Sales for ${ticket.ticketName} have closed — pick another day.`
         );
       }
       if (ticket.maxTicketPerUser && line.quantity > ticket.maxTicketPerUser) {

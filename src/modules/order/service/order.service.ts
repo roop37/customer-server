@@ -1209,6 +1209,8 @@ class OrderService {
         orderTickets.push({
           ticketTypeId: String(line.itemId),
           ticketName: String(ref.ticketName ?? line.name),
+          // Authoritative per-day tag from the event ticket (null single-day).
+          dayId: ref.dayId ?? undefined,
           quantity: line.quantity,
           unitPrice,
           totalPrice: +(unitPrice * line.quantity).toFixed(2),
@@ -1626,6 +1628,9 @@ class OrderService {
       return {
         ticketTypeId: line.ticketId,
         ticketName: String(ref.ticketName ?? "Ticket"),
+        // Snapshot the per-day tag so the scanner reads it off the order line
+        // without re-joining the event (null on single-day events).
+        dayId: ref.dayId ?? undefined,
         quantity: line.quantity,
         unitPrice,
         totalPrice: +(unitPrice * line.quantity).toFixed(2),
