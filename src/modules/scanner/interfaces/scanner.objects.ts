@@ -12,6 +12,8 @@ export enum ScanResultStatus {
   SCANNER_INACTIVE = "SCANNER_INACTIVE",
   EVENT_NOT_STARTED = "EVENT_NOT_STARTED",
   EVENT_ENDED = "EVENT_ENDED",
+  // Multi-day: the ticket is valid, but not for the day being scanned today.
+  WRONG_DAY = "WRONG_DAY",
 }
 registerEnumType(ScanResultStatus, { name: "ScanResultStatus" });
 
