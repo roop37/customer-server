@@ -1261,6 +1261,11 @@ class OrderService {
       hoizrCommissionPercent = aiCommissionPct;
     } else if (selectedPlan) {
       hoizrCommissionPercent = Number(selectedPlan.commissionRate ?? 0);
+    } else if (Number(pricing.grossAmount ?? 0) <= 0) {
+      // Free / RSVP event — nothing is being charged, so there's no commission
+      // to take and no pricing plan is required. (A paid event with unpriced
+      // tickets still errors below because its gross is > 0.)
+      hoizrCommissionPercent = 0;
     } else {
       throw new ErrorWithProps(
         "Event is not priced: select a pricing plan before issuing tickets."
@@ -1755,6 +1760,10 @@ class OrderService {
       hoizrCommissionPercent = aiCommissionPct;
     } else if (selectedPlan) {
       hoizrCommissionPercent = Number(selectedPlan.commissionRate ?? 0);
+    } else if (Number(grossAmount ?? 0) <= 0) {
+      // Free / RSVP order — nothing charged, no commission, no pricing plan
+      // needed. Paid orders with an unpriced event still error below.
+      hoizrCommissionPercent = 0;
     } else {
       throw new ErrorWithProps(
         "Event is not priced: host must select a pricing plan before tickets can be sold."
