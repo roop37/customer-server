@@ -164,6 +164,13 @@ class CartService {
                 new Date(ticket.ticketExpiryDateTime) < now) {
                 throw new mercurius_1.ErrorWithProps(`${ticket.ticketName} is no longer on sale`);
             }
+            // Multi-day: a day's tickets stop selling at that day's start time; an
+            // all-days pass (and any untagged ticket) closes at the earliest day
+            // start. Single-day events skip this entirely.
+            if ((0, shared_1.isMultiDay)(event) &&
+                (0, shared_1.daySalesClosed)(event, ticket.dayId ?? shared_1.ALL_DAYS_TICKET, now)) {
+                throw new mercurius_1.ErrorWithProps(`Sales for ${ticket.ticketName} have closed — pick another day.`);
+            }
             if (ticket.maxTicketPerUser && line.quantity > ticket.maxTicketPerUser) {
                 throw new mercurius_1.ErrorWithProps(`${ticket.ticketName} allows max ${ticket.maxTicketPerUser} per user`);
             }

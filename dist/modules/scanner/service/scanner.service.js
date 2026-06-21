@@ -184,7 +184,7 @@ class ScannerService {
             _id: ctx.scannerEventId,
             isDeleted: false,
         })
-            .select("startDate endDate status")
+            .select("startDate endDate status days")
             .lean();
         if (!event) {
             return {
@@ -307,7 +307,7 @@ class ScannerService {
             _id: ctx.scannerEventId,
             isDeleted: false,
         })
-            .select("startDate endDate status")
+            .select("startDate endDate status days")
             .lean();
         if (!event) {
             return {
@@ -452,6 +452,84 @@ class ScannerService {
             return {
                 status: scanner_objects_1.ScanResultStatus.INVALID_QR,
                 message: "QR code signature is invalid",
+            };
+        }
+        // Multi-day events use per-day check-in (order.dayCheckIns) instead of the
+        // single-day `checkedIn` boolean, so an all-days pass can enter on each
+        // day. We never flip `checkedIn`/orderStatus here, so the single-day gates
+        // above pass through untouched for these orders.
+        if ((0, shared_1.isMultiDay)(event)) {
+            // Resolve today's day with a 2h grace each side, mirroring the
+            // doors-open grace; between days no day resolves.
+            const GRACE_MS = 2 * 60 * 60 * 1000;
+            const graceDays = (event.days ?? []).map((d) => ({
+                dayId: d.dayId,
+                startDate: new Date(new Date(d.startDate).getTime() - GRACE_MS),
+                endDate: new Date(new Date(d.endDate).getTime() + GRACE_MS),
+            }));
+            const dayId = (0, shared_1.resolveCurrentDayId)({ days: graceDays }, now);
+            if (!dayId) {
+                return {
+                    status: scanner_objects_1.ScanResultStatus.EVENT_NOT_STARTED,
+                    message: "No event day is open for entry right now.",
+                };
+            }
+            const admits = (existing.tickets ?? []).some((t) => (0, shared_1.ticketAdmitsDay)(t, dayId));
+            if (!admits) {
+                return {
+                    status: scanner_objects_1.ScanResultStatus.WRONG_DAY,
+                    message: "This ticket isn't valid for today.",
+                };
+            }
+            // Atomic per-day claim: push only if no entry exists for this day yet.
+            // The `dayCheckIns.dayId != dayId` filter makes a same-day re-scan (or a
+            // parallel-scanner race) miss → ALREADY_CHECKED_IN, while a different day
+            // still succeeds.
+            const claimedDay = await order_schema_1.OrderModel.findOneAndUpdate({
+                _id: parsed.orderId,
+                eventId: ctx.scannerEventId,
+                razorpayPaymentId: parsed.paymentId,
+                orderStatus: shared_1.OrderStatus.PAYMENT_SUCCESS,
+                isDeleted: false,
+                "dayCheckIns.dayId": { $ne: dayId },
+            }, {
+                $push: {
+                    dayCheckIns: { dayId, checkedInAt: now, scannerId: ctx.scannerId },
+                },
+            }, { new: true }).lean();
+            if (!claimedDay) {
+                return {
+                    status: scanner_objects_1.ScanResultStatus.ALREADY_CHECKED_IN,
+                    message: "Already checked in for today.",
+                };
+            }
+            await scanner_user_schema_1.ScannerUserModel.updateOne({ _id: ctx.scannerId }, { $inc: { totalScanned: 1 } });
+            const totalTicketsDay = (claimedDay.tickets ?? []).reduce((sum, t) => sum + Number(t.quantity ?? 0), 0);
+            return {
+                status: wasRefunded ? scanner_objects_1.ScanResultStatus.REFUNDED : scanner_objects_1.ScanResultStatus.OK,
+                message: wasRefunded
+                    ? "Order has been refunded — verify with host before admitting"
+                    : "Ticket valid. Welcome in!",
+                order: {
+                    orderId: claimedDay._id.toString(),
+                    customerName: [
+                        claimedDay.guestInfo?.firstName,
+                        claimedDay.guestInfo?.lastName,
+                    ]
+                        .filter(Boolean)
+                        .join(" "),
+                    customerPhone: claimedDay.guestInfo?.phone,
+                    tickets: (claimedDay.tickets ?? []).map((t) => ({
+                        ticketName: t.ticketName,
+                        quantity: t.quantity,
+                    })),
+                    extras: (claimedDay.extras ?? []).map((e) => ({
+                        extraName: e.extraName,
+                        quantity: e.quantity,
+                    })),
+                    totalTickets: totalTicketsDay,
+                    checkedInAt: now,
+                },
             };
         }
         // Atomic claim: race-safe against parallel scanners. Only the first

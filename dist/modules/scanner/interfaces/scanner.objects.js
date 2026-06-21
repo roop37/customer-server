@@ -24,6 +24,8 @@ var ScanResultStatus;
     ScanResultStatus["SCANNER_INACTIVE"] = "SCANNER_INACTIVE";
     ScanResultStatus["EVENT_NOT_STARTED"] = "EVENT_NOT_STARTED";
     ScanResultStatus["EVENT_ENDED"] = "EVENT_ENDED";
+    // Multi-day: the ticket is valid, but not for the day being scanned today.
+    ScanResultStatus["WRONG_DAY"] = "WRONG_DAY";
 })(ScanResultStatus || (exports.ScanResultStatus = ScanResultStatus = {}));
 (0, type_graphql_1.registerEnumType)(ScanResultStatus, { name: "ScanResultStatus" });
 let ScannerLoginResponse = class ScannerLoginResponse {
