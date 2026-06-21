@@ -988,6 +988,13 @@ class OrderService {
    * stored so guest purchases are countable. Reuses the EXACT online order
    * flow (seed cart → createOrder), so no money-path logic is duplicated.
    */
+  /**
+   * @deprecated REMOVED from the API (2026-06-22): guest checkout no longer
+   * exists — a customer must be logged in to place ANY order. The
+   * createGuestOrder GraphQL mutation has been deleted; this method has NO
+   * caller and must not be re-exposed. Offline payment links now require login
+   * and pay through the authed createOrder (which accepts offlineOrderId).
+   */
   async createGuestOrder(input: {
     eventId: string;
     tickets: { ticketId: string; quantity: number }[];
