@@ -1880,6 +1880,12 @@ class OrderService {
       pageQuery: input.pageQuery,
       promoterId: input.promoterId,
       referralCode: input.referralCode,
+      // Link to a host's offline payment link when the customer paid via /t/<code>
+      // (now an authed flow — guest checkout removed). The post-purchase worker
+      // reads Order.offlineOrderId to flip the OfflineOrder to PAID.
+      ...(input.offlineOrderId
+        ? { offlineOrderId: input.offlineOrderId, source: "OFFLINE_LINK" }
+        : {}),
     });
 
     const checkout = await this.ensureRazorpayOrder(
