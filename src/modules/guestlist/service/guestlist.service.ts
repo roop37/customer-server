@@ -83,6 +83,7 @@ class GuestlistService {
       eventId,
       isPublic: true,
       isActive: true,
+      isOpen: true,
     })
       .sort({ createdAt: 1 })
       .lean<any[]>();
@@ -147,6 +148,7 @@ class GuestlistService {
       contributorType: GuestlistContributorType.HOST,
       isPublic: true,
       isActive: true,
+      isOpen: true,
     })
       .sort({ createdAt: 1 })
       .lean<any[]>();
@@ -183,7 +185,7 @@ class GuestlistService {
     code: string,
     customerId?: string
   ): Promise<GuestlistJoinView> {
-    const config = await GuestlistModel.findOne({ code, isActive: true }).lean<any>();
+    const config = await GuestlistModel.findOne({ code, isActive: true, isOpen: true }).lean<any>();
     if (!config) {
       throw new ErrorWithProps("This guestlist link is no longer active.");
     }
@@ -237,13 +239,13 @@ class GuestlistService {
     code: string,
     customerId: string
   ): Promise<GuestlistTicketView> {
-    const config = await GuestlistModel.findOne({ code, isActive: true }).lean<any>();
+    const config = await GuestlistModel.findOne({ code, isActive: true, isOpen: true }).lean<any>();
     if (!config) {
       throw new ErrorWithProps("This guestlist link is no longer active.");
     }
     const event = await EventModel.findById(config.eventId)
       .select(
-        "title eventFlyer startDate endDate status city location guestlistEnabled guestlistAutoAccept"
+        "title eventFlyer startDate endDate status city location guestlistEnabled guestlistAutoAccept guestlistMaxCapacity"
       )
       .lean<any>();
     if (!event || !event.guestlistEnabled) {
@@ -283,6 +285,23 @@ class GuestlistService {
       });
       if (count >= config.cap) {
         throw new ErrorWithProps("This guestlist is full.");
+      }
+    }
+
+    // Event-wide room cap: sum of ACCEPTED entries across ALL the event's lists
+    // may not exceed event.guestlistMaxCapacity (in addition to the per-list cap).
+    if (event.guestlistMaxCapacity != null) {
+      const listIds = (
+        await GuestlistModel.find({ eventId: String(event._id) })
+          .select("_id")
+          .lean<{ _id: any }[]>()
+      ).map((l) => String(l._id));
+      const acceptedAcrossEvent = await GuestlistEntryModel.countDocuments({
+        guestlistId: { $in: listIds },
+        status: GuestlistEntryStatus.ACCEPTED,
+      });
+      if (acceptedAcrossEvent >= event.guestlistMaxCapacity) {
+        throw new ErrorWithProps("This event's guest list is full.");
       }
     }
 
