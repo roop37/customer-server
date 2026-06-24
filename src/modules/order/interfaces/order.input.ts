@@ -65,6 +65,12 @@ export class CreateOrderInput {
   /** Promo/coupon code the customer applied at checkout. */
   @Field(() => String, { nullable: true })
   couponCode?: string;
+
+  /** Set when paying a host's offline payment link (/t/<code>) — now an authed
+   *  flow (guest checkout removed). Links the order to its OfflineOrder so it
+   *  flips to PAID on finalisation. */
+  @Field(() => String, { nullable: true })
+  offlineOrderId?: string;
 }
 
 @InputType()

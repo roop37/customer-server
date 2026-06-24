@@ -988,6 +988,13 @@ class OrderService {
    * stored so guest purchases are countable. Reuses the EXACT online order
    * flow (seed cart → createOrder), so no money-path logic is duplicated.
    */
+  /**
+   * @deprecated REMOVED from the API (2026-06-22): guest checkout no longer
+   * exists — a customer must be logged in to place ANY order. The
+   * createGuestOrder GraphQL mutation has been deleted; this method has NO
+   * caller and must not be re-exposed. Offline payment links now require login
+   * and pay through the authed createOrder (which accepts offlineOrderId).
+   */
   async createGuestOrder(input: {
     eventId: string;
     tickets: { ticketId: string; quantity: number }[];
@@ -1261,6 +1268,11 @@ class OrderService {
       hoizrCommissionPercent = aiCommissionPct;
     } else if (selectedPlan) {
       hoizrCommissionPercent = Number(selectedPlan.commissionRate ?? 0);
+    } else if (Number(pricing.grossAmount ?? 0) <= 0) {
+      // Free / RSVP event — nothing is being charged, so there's no commission
+      // to take and no pricing plan is required. (A paid event with unpriced
+      // tickets still errors below because its gross is > 0.)
+      hoizrCommissionPercent = 0;
     } else {
       throw new ErrorWithProps(
         "Event is not priced: select a pricing plan before issuing tickets."
@@ -1755,6 +1767,10 @@ class OrderService {
       hoizrCommissionPercent = aiCommissionPct;
     } else if (selectedPlan) {
       hoizrCommissionPercent = Number(selectedPlan.commissionRate ?? 0);
+    } else if (Number(grossAmount ?? 0) <= 0) {
+      // Free / RSVP order — nothing charged, no commission, no pricing plan
+      // needed. Paid orders with an unpriced event still error below.
+      hoizrCommissionPercent = 0;
     } else {
       throw new ErrorWithProps(
         "Event is not priced: host must select a pricing plan before tickets can be sold."
@@ -1835,6 +1851,30 @@ class OrderService {
       return { order: pending.toObject ? pending.toObject() : pending, checkout };
     }
 
+    // IDOR guard (security review 2026-06-22): when linking to a host's offline
+    // payment link, verify it's real, belongs to THIS event, and is still
+    // awaiting payment — so a customer can't attach their order to an arbitrary,
+    // already-paid/cancelled/expired, or cross-event offline link.
+    if (input.offlineOrderId) {
+      if (!isAlphanumeric(input.offlineOrderId)) {
+        throw new ErrorWithProps("Invalid payment link.");
+      }
+      const offline: any = await OfflineOrderModel.findById(input.offlineOrderId)
+        .select("status linkedOrderId eventId isDeleted")
+        .lean();
+      if (
+        !offline ||
+        offline.isDeleted === true ||
+        String(offline.eventId) !== String(event._id) ||
+        offline.linkedOrderId ||
+        offline.status === "PAID" ||
+        offline.status === "CANCELLED" ||
+        offline.status === "EXPIRED"
+      ) {
+        throw new ErrorWithProps("This payment link is no longer valid.");
+      }
+    }
+
     const created = await OrderModel.create({
       customerId,
       guestInfo: input.guestInfo,
@@ -1864,6 +1904,12 @@ class OrderService {
       pageQuery: input.pageQuery,
       promoterId: input.promoterId,
       referralCode: input.referralCode,
+      // Link to a host's offline payment link when the customer paid via /t/<code>
+      // (now an authed flow — guest checkout removed). The post-purchase worker
+      // reads Order.offlineOrderId to flip the OfflineOrder to PAID.
+      ...(input.offlineOrderId
+        ? { offlineOrderId: input.offlineOrderId, source: "OFFLINE_LINK" }
+        : {}),
     });
 
     const checkout = await this.ensureRazorpayOrder(

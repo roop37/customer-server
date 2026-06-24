@@ -3,7 +3,6 @@ import { isCustomerAuthenticated } from "../../../middlewares/customer-auth";
 import Context from "../../../types/context.type";
 import {
   CreateOrderInput,
-  GuestOrderInput,
   MyOrdersFilterInput,
   PreviewCouponInput,
 } from "../interfaces/order.input";
@@ -11,17 +10,11 @@ import {
   CouponPreviewView,
   CreateOrderResponse,
   CustomerOrderInvoice,
-  GuestCheckoutResponse,
   OfflinePaymentLinkView,
   PublicCoupon,
 } from "../interfaces/order.objects";
 import { CustomerOrderView, toCustomerOrderView } from "../interfaces/order.view";
 import OrderService from "../service/order.service";
-import {
-  CustomerCookieKeys,
-  setCustomerCookie,
-} from "../../../utils/cookie";
-
 @Resolver()
 export class OrderResolver {
   private readonly service = new OrderService();
@@ -74,41 +67,10 @@ export class OrderResolver {
     return this.service.visibleCouponsForEvent(eventId) as any;
   }
 
-  @Mutation(() => GuestCheckoutResponse)
-  async createGuestOrder(
-    @Arg("input") input: GuestOrderInput,
-    @Ctx() ctx: Context
-  ): Promise<GuestCheckoutResponse> {
-    const { result, accountFound, accountEmail, loggedIn, session } =
-      await this.service.createGuestOrder(input);
-    // New-account session → set the same httpOnly auth cookies the OTP-verify
-    // path sets, so the buyer is logged in immediately. Tokens never appear in
-    // the GraphQL body — only `loggedIn` is surfaced.
-    if (session) {
-      setCustomerCookie(
-        CustomerCookieKeys.ACCESS_TOKEN,
-        session.accessToken,
-        ctx.rep
-      );
-      setCustomerCookie(
-        CustomerCookieKeys.REFRESH_TOKEN,
-        session.refreshToken,
-        ctx.rep
-      );
-      setCustomerCookie(
-        CustomerCookieKeys.UNIQUE_ID,
-        session.uniqueId,
-        ctx.rep
-      );
-    }
-    return {
-      order: toCustomerOrderView(result.order),
-      checkout: result.checkout,
-      accountFound,
-      accountEmail,
-      loggedIn,
-    };
-  }
+  // Guest checkout REMOVED (2026-06-22, user directive): there is no guest
+  // order — a customer must be logged in to place ANY order. Offline payment
+  // links now require login and pay via the authed createOrder (which accepts
+  // offlineOrderId). The old createGuestOrder mutation + service are gone.
 
   /**
    * AUDIT-030: lets the checkout client resume a PaymentPending order

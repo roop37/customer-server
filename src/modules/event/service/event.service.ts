@@ -88,8 +88,18 @@ class PublicEventService {
     // one array so they never collide with each other's $or.
     const and: Record<string, any>[] = [];
 
-    if (input.cityId) query.cityId = input.cityId;
-    else if (input.city) query.city = new RegExp(`^${escapeRegex(input.city)}$`, "i");
+    // City filter — a multi-city event must surface under ANY of its cities.
+    // Per-day venues store only a city string (AddressInfo has no cityId), so
+    // the cityId path matches the event's top-level city, and the city-name
+    // path additionally matches any per-day venue city.
+    if (input.cityId) {
+      query.cityId = input.cityId;
+    } else if (input.city) {
+      const cityRx = new RegExp(`^${escapeRegex(input.city)}$`, "i");
+      and.push({
+        $or: [{ city: cityRx }, { "days.location.city": cityRx }],
+      });
+    }
 
     if (input.eventCategoryIds?.length) {
       query.eventCategoryId = { $in: input.eventCategoryIds };
