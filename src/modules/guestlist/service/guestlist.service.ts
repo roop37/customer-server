@@ -4,6 +4,7 @@ import {
   GuestlistEntryStatus,
 } from "@hoizr-technology/shared";
 import { ErrorWithProps } from "mercurius";
+import QRCode from "qrcode";
 import { generateGuestlistQrPayload } from "../../../utils/guestlist-qr";
 import { enqueueLifecycleEmail } from "../../../utils/lifecycle.queue";
 import { CustomerModel } from "../../customer/schema/customer.schema";
@@ -346,15 +347,82 @@ class GuestlistService {
       throw e;
     }
 
-    // Auto-accepted → confirm by email. (Approval-mode joins are emailed
-    // when the organizer approves, from main-server.) Best-effort.
+    // Auto-accepted → confirm by email with the golden-pass QR inline.
+    // (Approval-mode joins are emailed when the organizer approves, from
+    // main-server.) Best-effort.
     if (status === GuestlistEntryStatus.ACCEPTED && customer?.email) {
       try {
+        const start = event.startDate ? new Date(event.startDate) : null;
+        const data: Record<string, unknown> = {
+          name: entry.guestName ?? "",
+          guestName: entry.guestName ?? "",
+          eventTitle: event.title ?? "",
+          eventDayLong: start
+            ? new Intl.DateTimeFormat("en-IN", {
+                weekday: "long",
+                day: "2-digit",
+                month: "long",
+                year: "numeric",
+              }).format(start)
+            : "",
+          eventTime: start
+            ? new Intl.DateTimeFormat("en-IN", {
+                hour: "2-digit",
+                minute: "2-digit",
+              }).format(start)
+            : "",
+          venueName:
+            event.location?.formattedAddress ??
+            event.location?.addressLine1 ??
+            event.city ??
+            "",
+          venueCity: event.city ?? event.location?.city ?? "",
+          horizontalFlyerUrl: event.horizontalFlyer ?? event.eventFlyer ?? "",
+          viewPassUrl:
+            (process.env.CUSTOMER_APP_URL ?? "https://hoizr.com").replace(
+              /\/+$/,
+              ""
+            ) + "/orders",
+          qrAvailable: false,
+        };
+        let attachments:
+          | Array<{
+              filename: string;
+              content: string;
+              encoding: string;
+              cid?: string;
+              contentType?: string;
+            }>
+          | undefined;
+        if (entry.qrCodeData) {
+          try {
+            const png = await QRCode.toBuffer(String(entry.qrCodeData), {
+              type: "png",
+              errorCorrectionLevel: "M",
+              margin: 1,
+              width: 480,
+              color: { dark: "#0F1E3F", light: "#FFFFFF" },
+            });
+            attachments = [
+              {
+                filename: "golden-pass-qr.png",
+                content: png.toString("base64"),
+                encoding: "base64",
+                cid: "guestlist-qr",
+                contentType: "image/png",
+              },
+            ];
+            data.qrAvailable = true;
+          } catch {
+            // ship with the pass button instead
+          }
+        }
         await enqueueLifecycleEmail(
           "GUESTLIST_ACCEPTED" as any,
           customer.email,
           entry.guestName ?? undefined,
-          { eventTitle: event.title ?? "" }
+          data,
+          attachments
         );
       } catch {
         // non-fatal

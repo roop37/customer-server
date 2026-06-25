@@ -3,7 +3,6 @@ import {
   ConfigTypeEnum,
   Coupon,
   EventStatus,
-  LifecycleEmailType,
   LifecycleSmsType,
   OrderDiscountType,
   OrderStatus,
@@ -20,7 +19,6 @@ import crypto from "crypto";
 import { ErrorWithProps } from "mercurius";
 import { EnvVars } from "../../../utils/environment";
 import { signQrPayload } from "../../../utils/qr-hash";
-import { enqueueLifecycleEmail } from "../../../utils/lifecycle.queue";
 import { getRazorpayPayments } from "../../../utils/razorpay.client";
 import { RedisKeys, redisClient } from "../../../utils/redis";
 import { isAlphanumeric } from "../../../utils/validations";
@@ -1452,27 +1450,15 @@ class OrderService {
           .lean()
       : null;
 
-    const recipientEmail = customer?.email ?? order.guestInfo?.email ?? "";
     const recipientPhone = customer?.phone ?? order.guestInfo?.phone ?? "";
-    const recipientName =
-      [customer?.firstName, customer?.lastName].filter(Boolean).join(" ") ||
-      [order.guestInfo?.firstName, order.guestInfo?.lastName]
-        .filter(Boolean)
-        .join(" ");
 
-    if (recipientEmail) {
-      await enqueueLifecycleEmail(
-        LifecycleEmailType.CUSTOMER_ORDER_PLACED,
-        recipientEmail,
-        recipientName,
-        {
-          orderId: order._id.toString(),
-          totalAmount: Number(order.totalAmount ?? 0),
-          eventId: order.eventId?.toString?.() ?? String(order.eventId),
-        }
-      );
-    }
-
+    // NOTE: the order-confirmation EMAIL is no longer sent from here. Every
+    // confirmed order — free/RSVP, paid, offline — now gets the single rich
+    // QR e-ticket email (CUSTOMER_ORDER_CONFIRMED_WITH_TICKET) from
+    // hoizr-workers: paid via runPaidOrderFanout, free via the post-purchase
+    // worker's dispatchFreeOrderConfirmation. Sending the old bare
+    // CUSTOMER_ORDER_PLACED email here would double-mail the customer. Only
+    // the SMS + analytics fire from this path now.
     if (recipientPhone) {
       await lifecycleSmsQueue.add(LifecycleSmsType.CUSTOMER_ORDER_PLACED, {
         phoneNumber: recipientPhone,
