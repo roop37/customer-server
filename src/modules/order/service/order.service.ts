@@ -925,6 +925,14 @@ class OrderService {
           pageQuery: input.pageQuery,
           promoterId: input.promoterId,
           referralCode: input.referralCode,
+          // A ₹0 / RSVP offline payment link finalizes here (free path). Carry
+          // the offline link id + source exactly like the paid path so the
+          // post-purchase worker can flip the OfflineOrder LINK_SENT → PAID.
+          // (The offlineOrderId is validated by the IDOR guard in createOrder,
+          // which now runs before this free branch.)
+          ...(input.offlineOrderId
+            ? { offlineOrderId: input.offlineOrderId, source: "OFFLINE_LINK" }
+            : {}),
         });
 
         const paymentId = `free_${order._id.toString()}`;
@@ -1888,6 +1896,32 @@ class OrderService {
           : undefined,
     });
 
+    // IDOR guard (security review 2026-06-22): when linking to a host's offline
+    // payment link, verify it's real, belongs to THIS event, and is still
+    // awaiting payment — so a customer can't attach their order to an arbitrary,
+    // already-paid/cancelled/expired, or cross-event offline link. Runs BEFORE
+    // the free branch so ₹0 offline links are validated too (the free path also
+    // stamps offlineOrderId now).
+    if (input.offlineOrderId) {
+      if (!isAlphanumeric(input.offlineOrderId)) {
+        throw new ErrorWithProps("Invalid payment link.");
+      }
+      const offline: any = await OfflineOrderModel.findById(input.offlineOrderId)
+        .select("status linkedOrderId eventId isDeleted")
+        .lean();
+      if (
+        !offline ||
+        offline.isDeleted === true ||
+        String(offline.eventId) !== String(event._id) ||
+        offline.linkedOrderId ||
+        offline.status === "PAID" ||
+        offline.status === "CANCELLED" ||
+        offline.status === "EXPIRED"
+      ) {
+        throw new ErrorWithProps("This payment link is no longer valid.");
+      }
+    }
+
     if (pricing.totalAmount <= 0) {
       const order = await this.finalizeFreeOrder(
         customerId,
@@ -1932,30 +1966,7 @@ class OrderService {
       return { order: pending.toObject ? pending.toObject() : pending, checkout };
     }
 
-    // IDOR guard (security review 2026-06-22): when linking to a host's offline
-    // payment link, verify it's real, belongs to THIS event, and is still
-    // awaiting payment — so a customer can't attach their order to an arbitrary,
-    // already-paid/cancelled/expired, or cross-event offline link.
-    if (input.offlineOrderId) {
-      if (!isAlphanumeric(input.offlineOrderId)) {
-        throw new ErrorWithProps("Invalid payment link.");
-      }
-      const offline: any = await OfflineOrderModel.findById(input.offlineOrderId)
-        .select("status linkedOrderId eventId isDeleted")
-        .lean();
-      if (
-        !offline ||
-        offline.isDeleted === true ||
-        String(offline.eventId) !== String(event._id) ||
-        offline.linkedOrderId ||
-        offline.status === "PAID" ||
-        offline.status === "CANCELLED" ||
-        offline.status === "EXPIRED"
-      ) {
-        throw new ErrorWithProps("This payment link is no longer valid.");
-      }
-    }
-
+    // (offlineOrderId already validated above, before the free branch.)
     const created = await OrderModel.create({
       customerId,
       guestInfo: input.guestInfo,
