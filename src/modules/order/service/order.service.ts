@@ -28,6 +28,7 @@ import CartService, {
 import { CartHostGstContext } from "../../cart/service/cart-pricing";
 import { CustomerModel } from "../../customer/schema/customer.schema";
 import { EventModel } from "../../event/schema/event.schema";
+import { guestlistService } from "../../guestlist/service/guestlist.service";
 import { PayoutModel } from "../../payout/schema/payout.schema";
 import { CreateOrderInput } from "../interfaces/order.input";
 import { RazorpayCheckoutPayload } from "../interfaces/order.objects";
@@ -1027,6 +1028,17 @@ class OrderService {
         eventId: event._id.toString(),
       });
       await this.dispatchOrderConfirmationComms(createdOrder);
+      // Offline guestlist claim → also put the buyer on the host's guestlist
+      // (reusing this order's QR as the single door token). Best-effort + only
+      // fires for offline-link claims of a Guestlist-category ticket.
+      try {
+        await guestlistService.ensureOfflineGuestlistEntry({
+          order: createdOrder,
+          event,
+        });
+      } catch (err) {
+        console.error("ensureOfflineGuestlistEntry failed", err);
+      }
     }
     return createdOrder as Order;
   }

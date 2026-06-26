@@ -742,6 +742,19 @@ class ScannerService {
       { $inc: { totalScanned: 1 } }
     );
 
+    // Offline guestlist claim: the guestlist entry reuses THIS order's QR (one
+    // door token), so the scan above is the only check-in. Mirror it onto the
+    // linked entry so the host's guestlist view shows them as arrived too.
+    if ((claimed as any).offlineOrderId) {
+      await GuestlistEntryModel.updateOne(
+        {
+          offlineOrderId: String((claimed as any).offlineOrderId),
+          checkedIn: false,
+        },
+        { $set: { checkedIn: true, checkedInAt: now } }
+      ).catch(() => {});
+    }
+
     const totalTickets = (claimed.tickets ?? []).reduce(
       (sum: number, t: any) => sum + Number(t.quantity ?? 0),
       0
