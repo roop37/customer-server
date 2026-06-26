@@ -3,7 +3,6 @@ import {
   ConfigTypeEnum,
   Coupon,
   EventStatus,
-  LifecycleEmailType,
   LifecycleSmsType,
   OrderDiscountType,
   OrderStatus,
@@ -20,7 +19,6 @@ import crypto from "crypto";
 import { ErrorWithProps } from "mercurius";
 import { EnvVars } from "../../../utils/environment";
 import { signQrPayload } from "../../../utils/qr-hash";
-import { enqueueLifecycleEmail } from "../../../utils/lifecycle.queue";
 import { getRazorpayPayments } from "../../../utils/razorpay.client";
 import { RedisKeys, redisClient } from "../../../utils/redis";
 import { isAlphanumeric } from "../../../utils/validations";
@@ -847,6 +845,45 @@ class OrderService {
     appliedConfigSnapshot: ReturnType<OrderService["buildConfigSnapshot"]>,
     appliedDiscount?: ReturnType<OrderService["buildCouponSnapshot"]>
   ): Promise<Order> {
+    // Idempotency: a double-submitted RSVP (double-click, or a retried
+    // mutation) must not mint two confirmed orders. A free booking is keyed by
+    // the cart reservation instant — same (customer, event, reservedAt) + same
+    // lines = the same booking, so return the already-finalised order instead
+    // of creating a duplicate. (Capacity is still protected by the atomic $inc
+    // guard below, so the worst case without this is a double-booking, never an
+    // oversell. Best-effort under truly-simultaneous submits — the deletion of
+    // the cart on first finalize closes the sequential-submit window.)
+    const existingFree = await OrderModel.findOne({
+      customerId,
+      eventId: event._id.toString(),
+      reservedAt,
+      orderStatus: OrderStatus.PAYMENT_SUCCESS,
+      isDeleted: false,
+    }).sort({ createdAt: -1 });
+    if (existingFree) {
+      const sameTickets =
+        (existingFree.tickets ?? []).length === orderTickets.length &&
+        orderTickets.every((line) =>
+          (existingFree.tickets ?? []).some(
+            (e: any) =>
+              e.ticketTypeId === line.ticketTypeId &&
+              Number(e.quantity ?? 0) === Number(line.quantity)
+          )
+        );
+      const sameExtras =
+        (existingFree.extras ?? []).length === orderExtras.length &&
+        orderExtras.every((line) =>
+          (existingFree.extras ?? []).some(
+            (e: any) =>
+              e.extraId === line.extraId &&
+              Number(e.quantity ?? 0) === Number(line.quantity)
+          )
+        );
+      if (sameTickets && sameExtras) {
+        return existingFree.toObject() as Order;
+      }
+    }
+
     const session = await mongoose.startSession();
     let createdOrder: any = null;
 
@@ -964,7 +1001,14 @@ class OrderService {
       await session.endSession();
     }
 
-    await this.cart.finalizeCartForOrder(customerId, event._id.toString());
+    // Best-effort cart cleanup outside the transaction — a Redis blip here
+    // must NOT throw out of an already-finalised free order (which would rob
+    // the buyer of their QR e-ticket comms below). Mirrors the paid path.
+    try {
+      await this.cart.finalizeCartForOrder(customerId, event._id.toString());
+    } catch {
+      // Cart cleanup is advisory; the free order is already finalised.
+    }
     if (createdOrder?._id) {
       // Free orders confirm immediately → record the coupon redemption now.
       await this.recordCouponRedemption(createdOrder);
@@ -1452,27 +1496,15 @@ class OrderService {
           .lean()
       : null;
 
-    const recipientEmail = customer?.email ?? order.guestInfo?.email ?? "";
     const recipientPhone = customer?.phone ?? order.guestInfo?.phone ?? "";
-    const recipientName =
-      [customer?.firstName, customer?.lastName].filter(Boolean).join(" ") ||
-      [order.guestInfo?.firstName, order.guestInfo?.lastName]
-        .filter(Boolean)
-        .join(" ");
 
-    if (recipientEmail) {
-      await enqueueLifecycleEmail(
-        LifecycleEmailType.CUSTOMER_ORDER_PLACED,
-        recipientEmail,
-        recipientName,
-        {
-          orderId: order._id.toString(),
-          totalAmount: Number(order.totalAmount ?? 0),
-          eventId: order.eventId?.toString?.() ?? String(order.eventId),
-        }
-      );
-    }
-
+    // NOTE: the order-confirmation EMAIL is no longer sent from here. Every
+    // confirmed order — free/RSVP, paid, offline — now gets the single rich
+    // QR e-ticket email (CUSTOMER_ORDER_CONFIRMED_WITH_TICKET) from
+    // hoizr-workers: paid via runPaidOrderFanout, free via the post-purchase
+    // worker's dispatchFreeOrderConfirmation. Sending the old bare
+    // CUSTOMER_ORDER_PLACED email here would double-mail the customer. Only
+    // the SMS + analytics fire from this path now.
     if (recipientPhone) {
       await lifecycleSmsQueue.add(LifecycleSmsType.CUSTOMER_ORDER_PLACED, {
         phoneNumber: recipientPhone,
@@ -1679,6 +1711,55 @@ class OrderService {
         totalPrice: +(unitPrice * line.quantity).toFixed(2),
       };
     });
+
+    // Per-user ticket cap (maxTicketPerUser). The per-line check above bounds a
+    // SINGLE order; this bounds the customer's CUMULATIVE confirmed tickets for
+    // each ticket type, so a buyer can't grab the whole allocation across
+    // repeat orders (notably free RSVPs). Refunded / cancelled / superseded /
+    // pending orders don't count. Best-effort under high concurrency (two
+    // simultaneous orders could both pass), but capacity oversell stays fully
+    // protected by the atomic $inc guard at finalize.
+    const cappedLines = orderTickets.filter((line) => {
+      const ref = ticketMap.get(line.ticketTypeId);
+      return ref?.maxTicketPerUser && Number(ref.maxTicketPerUser) > 0;
+    });
+    if (cappedLines.length) {
+      const priorAgg = await OrderModel.aggregate([
+        {
+          $match: {
+            customerId,
+            eventId: input.eventId,
+            orderStatus: {
+              $in: [OrderStatus.PAYMENT_SUCCESS, OrderStatus.CHECKED_IN],
+            },
+            isDeleted: false,
+          },
+        },
+        { $unwind: "$tickets" },
+        {
+          $group: {
+            _id: "$tickets.ticketTypeId",
+            qty: { $sum: "$tickets.quantity" },
+          },
+        },
+      ]);
+      const priorByType = new Map<string, number>(
+        priorAgg.map((r: any) => [String(r._id), Number(r.qty ?? 0)])
+      );
+      for (const line of cappedLines) {
+        const ref = ticketMap.get(line.ticketTypeId)!;
+        const cap = Number(ref.maxTicketPerUser);
+        const prior = priorByType.get(line.ticketTypeId) ?? 0;
+        if (prior + Number(line.quantity) > cap) {
+          const remaining = Math.max(0, cap - prior);
+          throw new ErrorWithProps(
+            remaining === 0
+              ? `You've reached the limit of ${cap} "${ref.ticketName}" per person.`
+              : `You can book at most ${cap} "${ref.ticketName}" per person — you already have ${prior}, so you can add ${remaining} more.`
+          );
+        }
+      }
+    }
 
     // Venue-wide capacity guard. Per-ticket caps can sum higher than the
     // venue allows (e.g. 100 GA + 50 VIP at a 120-cap venue). Defends
@@ -2004,6 +2085,66 @@ class OrderService {
       expiresAt,
       dateOfIssue: invoice.dateOfIssue,
     };
+  }
+
+  /**
+   * On-demand "get-or-generate" invoice. Recovers orders whose invoice was
+   * missed by the best-effort post-payment fanout (the only other generation
+   * trigger), which logs-and-swallows failures with no retry.
+   *  - Invoice already on file → return it now (READY) with a fresh signed URL.
+   *  - Order has no booking fee → NO_INVOICE_FREE_ORDER (the generator returns
+   *    null for these, so enqueuing would make the client poll forever).
+   *  - Otherwise → enqueue the EXISTING idempotent worker generator with a
+   *    deterministic jobId (`invoice:<orderId>`) so concurrent triggers (this
+   *    mutation racing the fanout) dedupe to a single PDF + invoice number, and
+   *    report GENERATING (client polls getMyOrderInvoice).
+   */
+  async generateMyOrderInvoice(
+    customerId: string,
+    orderId: string
+  ): Promise<{
+    status: string;
+    invoice: {
+      invoiceNumber: string;
+      pdfUrl: string;
+      expiresAt: Date;
+      dateOfIssue?: Date;
+    } | null;
+  }> {
+    if (!isAlphanumeric(orderId)) {
+      throw new ErrorWithProps("Invalid order id");
+    }
+
+    const order = await OrderModel.findOne({
+      _id: orderId,
+      customerId,
+      isDeleted: false,
+    })
+      .select("_id platformFee")
+      .lean<{ _id: any; platformFee?: number }>();
+    if (!order) throw new ErrorWithProps("Order not found");
+
+    // Already issued (and not voided) → hand back a freshly-signed link.
+    const existing = await this.getMyOrderInvoice(customerId, orderId);
+    if (existing) return { status: "READY", invoice: existing };
+
+    // A free / zero-booking-fee order has no tax invoice to issue — only the
+    // booking fee + its GST is invoiced. Matches the worker generator's own
+    // null short-circuit, so don't enqueue (it would never resolve).
+    if (Number(order.platformFee ?? 0) <= 0) {
+      return { status: "NO_INVOICE_FREE_ORDER", invoice: null };
+    }
+
+    await postPurchaseQueue.add(
+      "GENERATE_CUSTOMER_INVOICE",
+      { orderId: order._id.toString() },
+      {
+        jobId: `invoice:${order._id.toString()}`,
+        attempts: 3,
+        backoff: { type: "exponential", delay: 3000 },
+      }
+    );
+    return { status: "GENERATING", invoice: null };
   }
 
   async requestOrderRefund(

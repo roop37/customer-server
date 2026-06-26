@@ -204,3 +204,21 @@ export class CustomerOrderInvoice {
   @Field(() => Date, { nullable: true })
   dateOfIssue?: Date;
 }
+
+/**
+ * Result of the on-demand "get-or-generate" invoice mutation.
+ * `status` is one of:
+ *  - "READY"               → `invoice` is populated with a freshly signed link.
+ *  - "GENERATING"          → a worker is producing the PDF; client polls
+ *                            getMyOrderInvoice until it lands.
+ *  - "NO_INVOICE_FREE_ORDER" → a free / zero-booking-fee order has no tax
+ *                            invoice to issue; `invoice` is null.
+ */
+@ObjectType()
+export class GenerateInvoiceResult {
+  @Field(() => String)
+  status: string;
+
+  @Field(() => CustomerOrderInvoice, { nullable: true })
+  invoice?: CustomerOrderInvoice | null;
+}

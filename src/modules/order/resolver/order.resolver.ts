@@ -10,6 +10,7 @@ import {
   CouponPreviewView,
   CreateOrderResponse,
   CustomerOrderInvoice,
+  GenerateInvoiceResult,
   OfflinePaymentLinkView,
   PublicCoupon,
 } from "../interfaces/order.objects";
@@ -159,5 +160,24 @@ export class OrderResolver {
     @Arg("orderId") orderId: string
   ): Promise<CustomerOrderInvoice | null> {
     return this.service.getMyOrderInvoice(ctx.customerId as string, orderId);
+  }
+
+  /**
+   * On-demand invoice: if the invoice already exists, return it (READY); if the
+   * order has no booking fee, report NO_INVOICE_FREE_ORDER; otherwise enqueue
+   * the idempotent worker generator and report GENERATING (the client then
+   * polls getMyOrderInvoice). Recovers orders whose invoice was missed by the
+   * best-effort post-payment fanout.
+   */
+  @Mutation(() => GenerateInvoiceResult)
+  @UseMiddleware(isCustomerAuthenticated)
+  async generateMyOrderInvoice(
+    @Ctx() ctx: Context,
+    @Arg("orderId") orderId: string
+  ): Promise<GenerateInvoiceResult> {
+    return this.service.generateMyOrderInvoice(
+      ctx.customerId as string,
+      orderId
+    );
   }
 }
