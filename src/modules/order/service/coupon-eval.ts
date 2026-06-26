@@ -90,10 +90,10 @@ export const evaluateCoupon = (
 
   if (coupon.maxUsage != null && (ctx.totalUsageCount ?? 0) >= coupon.maxUsage)
     return fail("This coupon has reached its usage limit");
-  if (
-    coupon.maxUsagePerCustomer != null &&
-    (ctx.customerUsageCount ?? 0) >= coupon.maxUsagePerCustomer
-  )
+  // Per-customer cap: BLANK defaults to 1 (one use per customer), NOT unlimited.
+  // Applied here so existing coupons with no explicit cap also get the 1-use rule.
+  const perCustomerCap = coupon.maxUsagePerCustomer ?? 1;
+  if ((ctx.customerUsageCount ?? 0) >= perCustomerCap)
     return fail("You've already used this coupon the maximum number of times");
   if (
     coupon.couponUsageSalesLimit != null &&
