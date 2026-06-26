@@ -1174,6 +1174,16 @@ class OrderService {
     }).lean();
     if (!offline) throw new ErrorWithProps("This link is no longer valid");
 
+    // Record the FIRST open so the host can tell "sent but never opened" from
+    // "opened, not yet paid". Guarded so only the first resolve stamps it;
+    // best-effort (never block rendering the link on this write).
+    if (!offline.openedAt) {
+      OfflineOrderModel.updateOne(
+        { _id: offline._id, openedAt: { $exists: false } },
+        { $set: { openedAt: new Date() } }
+      ).catch(() => {});
+    }
+
     const event: any = await EventModel.findById(offline.eventId)
       .select("title slug eventFlyer horizontalFlyer")
       .lean();
