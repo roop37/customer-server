@@ -42,6 +42,20 @@ import {
 } from "../interfaces/scanner.objects";
 import { ScannerUserModel } from "../schema/scanner-user.schema";
 
+// Door staff can start scanning 2h before the doors open. When the host has set
+// a "gates open before the event" lead in the event guide, the doors open that
+// much earlier than the event start — so scanning opens earlier too. Returns
+// the gates-open lead in ms (0 when not configured), to ADD to the 2h grace on
+// the START side only (never extends the end of the check-in window).
+const gatesOpenLeadMs = (event: any): number => {
+  const g = event?.eventGuide;
+  if (!g?.gatesOpenBeforeEvent) return 0;
+  const ms =
+    Number(g.gatesOpenLeadHours ?? 0) * 3_600_000 +
+    Number(g.gatesOpenLeadMinutes ?? 0) * 60_000;
+  return Number.isFinite(ms) && ms > 0 ? ms : 0;
+};
+
 class ScannerService {
   async login(input: ScannerLoginInput): Promise<ScannerLoginResponse> {
     const email = input.email.trim().toLowerCase();
@@ -244,7 +258,7 @@ class ScannerService {
       _id: ctx.scannerEventId,
       isDeleted: false,
     })
-      .select("startDate endDate status days")
+      .select("startDate endDate status days eventGuide")
       .lean();
     if (!event) {
       return {
@@ -260,7 +274,9 @@ class ScannerService {
     }
 
     const now = asOf;
-    const SCAN_GRACE_BEFORE_START_MS = 2 * 60 * 60 * 1000;
+    // Open scanning 2h before doors. If the host set a gates-open lead, doors
+    // open before the event start, so scanning opens that much earlier too.
+    const SCAN_GRACE_BEFORE_START_MS = 2 * 60 * 60 * 1000 + gatesOpenLeadMs(event);
     if (
       event.startDate &&
       now.getTime() <
@@ -395,7 +411,7 @@ class ScannerService {
       _id: ctx.scannerEventId,
       isDeleted: false,
     })
-      .select("startDate endDate status days")
+      .select("startDate endDate status days eventGuide")
       .lean();
     if (!event) {
       return {
@@ -418,7 +434,9 @@ class ScannerService {
     // AUDIT-011: refuse scans more than 2h before doors open. The
     // 2-hour grace covers staff testing scanners at setup time without
     // accidentally admitting attendees too early.
-    const SCAN_GRACE_BEFORE_START_MS = 2 * 60 * 60 * 1000;
+    // Open scanning 2h before doors. If the host set a gates-open lead, doors
+    // open before the event start, so scanning opens that much earlier too.
+    const SCAN_GRACE_BEFORE_START_MS = 2 * 60 * 60 * 1000 + gatesOpenLeadMs(event);
     if (event.startDate) {
       const startsAt = new Date(event.startDate).getTime();
       if (now.getTime() < startsAt - SCAN_GRACE_BEFORE_START_MS) {
@@ -580,11 +598,15 @@ class ScannerService {
     if (isMultiDay(event as any)) {
       // Resolve today's day with a 2h grace each side, mirroring the
       // doors-open grace; between days no day resolves.
-      const GRACE_MS = 2 * 60 * 60 * 1000;
+      // 2h grace each side; the gates-open lead extends the START side only
+      // (scanning opens earlier when doors open before each day's start) — it
+      // must NOT push out the end of the check-in window.
+      const END_GRACE_MS = 2 * 60 * 60 * 1000;
+      const START_GRACE_MS = END_GRACE_MS + gatesOpenLeadMs(event);
       const graceDays = ((event as any).days ?? []).map((d: any) => ({
         dayId: d.dayId,
-        startDate: new Date(new Date(d.startDate).getTime() - GRACE_MS),
-        endDate: new Date(new Date(d.endDate).getTime() + GRACE_MS),
+        startDate: new Date(new Date(d.startDate).getTime() - START_GRACE_MS),
+        endDate: new Date(new Date(d.endDate).getTime() + END_GRACE_MS),
       }));
       const dayId = resolveCurrentDayId({ days: graceDays } as any, now);
       if (!dayId) {
@@ -719,6 +741,19 @@ class ScannerService {
       { _id: ctx.scannerId },
       { $inc: { totalScanned: 1 } }
     );
+
+    // Offline guestlist claim: the guestlist entry reuses THIS order's QR (one
+    // door token), so the scan above is the only check-in. Mirror it onto the
+    // linked entry so the host's guestlist view shows them as arrived too.
+    if ((claimed as any).offlineOrderId) {
+      await GuestlistEntryModel.updateOne(
+        {
+          offlineOrderId: String((claimed as any).offlineOrderId),
+          checkedIn: false,
+        },
+        { $set: { checkedIn: true, checkedInAt: now } }
+      ).catch(() => {});
+    }
 
     const totalTickets = (claimed.tickets ?? []).reduce(
       (sum: number, t: any) => sum + Number(t.quantity ?? 0),

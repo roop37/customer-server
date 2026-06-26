@@ -2,7 +2,9 @@ import {
   EventStatus,
   GuestlistContributorType,
   GuestlistEntryStatus,
+  TicketCategory,
 } from "@hoizr-technology/shared";
+import crypto from "crypto";
 import { ErrorWithProps } from "mercurius";
 import QRCode from "qrcode";
 import { generateGuestlistQrPayload } from "../../../utils/guestlist-qr";
@@ -493,6 +495,118 @@ class GuestlistService {
         configMap.get(String(e.guestlistId))
       )
     );
+  }
+
+  // ── Offline-link guestlist claim → guestlist entry ────────────────────────
+  // When a host-issued OFFLINE payment link for a GUESTLIST-category ticket is
+  // claimed (free/RSVP), put the customer on the host's guestlist so it shows
+  // there alongside link-joins. The DOOR TOKEN stays the order's own QR (RSVP
+  // style) — this entry REUSES that QR rather than minting a second scannable
+  // golden-pass QR (which would let one person be admitted twice). Best-effort:
+  // never block the order on it. Offline + Guestlist-category only.
+  async ensureOfflineGuestlistEntry(args: {
+    order: any;
+    event: any;
+  }): Promise<void> {
+    const { order, event } = args;
+    // Gate: customer-attributed (entry.customerId is required) + offline-link
+    // claim only. Online free-guestlist purchases keep their current behavior.
+    if (!order?.customerId || !order?.offlineOrderId) return;
+
+    const ticketById = new Map(
+      (event?.tickets ?? []).map((t: any) => [String(t._id), t])
+    );
+    const hasGuestlistLine = (order.tickets ?? []).some((l: any) => {
+      const t: any = ticketById.get(String(l.ticketTypeId));
+      return t?.ticketCategory === TicketCategory.GUESTLIST;
+    });
+    if (!hasGuestlistLine) return;
+
+    const parent = await this.ensureHostGuestlist(event);
+    if (!parent) return;
+
+    const customer = await CustomerModel.findById(order.customerId)
+      .select("firstName lastName email phone")
+      .lean<any>();
+
+    // Idempotent via the unique {guestlistId, customerId} index. Reuse the
+    // order's QR fields so there is exactly ONE scannable token at the door.
+    await GuestlistEntryModel.updateOne(
+      { guestlistId: String(parent._id), customerId: String(order.customerId) },
+      {
+        $setOnInsert: {
+          guestlistId: String(parent._id),
+          eventId: String(event._id),
+          customerId: String(order.customerId),
+          guestName:
+            [customer?.firstName, customer?.lastName]
+              .filter(Boolean)
+              .join(" ") || undefined,
+          guestEmail: customer?.email,
+          guestPhone: customer?.phone,
+          status: GuestlistEntryStatus.ACCEPTED,
+          qrCodeData: order.qrCodeData,
+          qrCodeHash: order.qrCodeHash,
+          qrHashVersion: order.qrHashVersion,
+          offlineOrderId: String(order.offlineOrderId),
+        },
+      },
+      { upsert: true }
+    );
+  }
+
+  // Find-or-create the HOST's own parent guestlist for an event. ensureContributor-
+  // Guestlists (main-server) only runs when the host opens the guestlist UI, so a
+  // host can issue a GUESTLIST offline ticket with no parent yet. Low-concurrency
+  // path (manual offline claims); the pre-check collapses the common case. A
+  // simultaneous first-claim race could create a duplicate HOST list (no unique
+  // index on the contributor tuple) — acceptable + rare; tighten with a unique
+  // index later if needed.
+  private async ensureHostGuestlist(event: any): Promise<any | null> {
+    const key = {
+      eventId: String(event._id),
+      contributorType: GuestlistContributorType.HOST,
+      contributorId: String(event.hostId),
+    };
+    const existing = await GuestlistModel.findOne(key);
+    if (existing) return existing;
+    for (let i = 0; i < 5; i++) {
+      try {
+        return await GuestlistModel.findOneAndUpdate(
+          key,
+          {
+            $setOnInsert: {
+              ...key,
+              hostId: String(event.hostId),
+              name: event?.title ? `${event.title} guestlist` : "Guestlist",
+              code: this.generateGuestlistCode(),
+              isPublic: false,
+              isActive: true,
+              manageEnabled: true,
+              isOpen: true,
+            },
+          },
+          { upsert: true, new: true }
+        );
+      } catch (e: any) {
+        // Unique {code} collision → retry with a fresh code; concurrent tuple
+        // insert → re-find the winner.
+        if (e?.code === 11000) {
+          const found = await GuestlistModel.findOne(key);
+          if (found) return found;
+          continue;
+        }
+        throw e;
+      }
+    }
+    return GuestlistModel.findOne(key);
+  }
+
+  private generateGuestlistCode(): string {
+    return (
+      crypto.randomBytes(8).toString("base64url").replace(/[^a-zA-Z0-9]/g, "") ||
+      crypto.randomBytes(8).toString("hex")
+    ).slice(0, 12);
   }
 }
 
