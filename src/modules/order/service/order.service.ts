@@ -25,7 +25,10 @@ import { isAlphanumeric } from "../../../utils/validations";
 import CartService, {
   CartTicketRef,
 } from "../../cart/service/cart.service";
-import { CartHostGstContext } from "../../cart/service/cart-pricing";
+import {
+  CartHostGstContext,
+  CartLineForPricing,
+} from "../../cart/service/cart-pricing";
 import { CustomerModel } from "../../customer/schema/customer.schema";
 import { EventModel } from "../../event/schema/event.schema";
 import { guestlistService } from "../../guestlist/service/guestlist.service";
@@ -692,9 +695,39 @@ class OrderService {
       quantity: t.quantity,
       unitPrice: t.unitPrice,
     }));
+    // Add-ons (extras) are NOT discounted by the coupon, but they ARE part of
+    // the taxable base that the platform fee + total are computed on. The
+    // preview input only carries tickets, so pull the reserved cart's extras
+    // from Redis — the SAME source createOrder prices against — so the
+    // previewed total reconciles with what the customer is actually charged.
+    // (Falls back to no extras if the cart reservation has lapsed.) Without
+    // this the preview dropped the add-on, showing a total LOWER than the
+    // Razorpay charge.
+    const storedCart = customerId
+      ? await this.cart.readStoredCart(customerId, input.eventId)
+      : null;
+    const extraPriceMap = new Map(
+      (event.extras ?? []).map((e: any) => [String(e._id), e])
+    );
+    const previewExtraLines: CartLineForPricing[] = (storedCart?.extras ?? [])
+      .map((line) => {
+        const ref: any = extraPriceMap.get(String(line.extraId));
+        if (!ref) return null;
+        const qty = Math.max(0, Math.trunc(Number(line.quantity) || 0));
+        if (qty <= 0) return null;
+        return { quantity: qty, unitPrice: Number(ref.price ?? 0) };
+      })
+      .filter(Boolean) as CartLineForPricing[];
+    // Tickets-only subtotal (pre-discount) kept distinct from baseline.grossAmount
+    // — the latter now includes extras in the taxable base, so it can't double as
+    // the "tickets subtotal" the API field name promises.
+    const ticketsOnlySubtotal = pricingLines.reduce(
+      (sum, l) => sum + l.unitPrice * Math.max(0, Math.trunc(l.quantity)),
+      0
+    );
     const baseline = this.cart.computePricingForLines(
       pricingLines,
-      [],
+      previewExtraLines,
       ticketRefs,
       applicationFeePercent,
       applicationFeeGstPercent,
@@ -702,7 +735,7 @@ class OrderService {
       0
     );
     const baseFields = {
-      ticketsSubtotal: baseline.grossAmount,
+      ticketsSubtotal: ticketsOnlySubtotal,
       totalBefore: baseline.totalAmount,
       totalAfter: baseline.totalAmount,
     };
@@ -754,7 +787,7 @@ class OrderService {
 
     const discounted = this.cart.computePricingForLines(
       pricingLines,
-      [],
+      previewExtraLines,
       ticketRefs,
       applicationFeePercent,
       applicationFeeGstPercent,
@@ -765,7 +798,7 @@ class OrderService {
       ok: true,
       code,
       discountAmount: discounted.discountAmount,
-      ticketsSubtotal: baseline.grossAmount,
+      ticketsSubtotal: ticketsOnlySubtotal,
       totalBefore: baseline.totalAmount,
       totalAfter: discounted.totalAmount,
       pricing: discounted,
