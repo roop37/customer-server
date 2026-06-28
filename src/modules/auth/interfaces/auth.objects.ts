@@ -4,6 +4,9 @@ import { Field, ObjectType, registerEnumType } from "type-graphql";
 export class CustomerOtpResponse {
   @Field(() => String)
   otpId: string;
+
+  @Field(() => Boolean)
+  profileRequired: boolean;
 }
 
 @ObjectType()
@@ -78,6 +81,9 @@ export class CustomerGoogleStartResponse {
   @Field(() => String, { nullable: true })
   refreshToken?: string;
 
+  @Field(() => String, { nullable: true })
+  uniqueId?: string;
+
   // Filled when outcome = PENDING_PHONE_REQUIRED. Client uses this
   // token in the follow-up phone-OTP mutations.
   @Field(() => String, { nullable: true })
@@ -119,6 +125,9 @@ export class CustomerPendingSignupVerifyOtpResponse {
 
   @Field(() => String)
   refreshToken: string;
+
+  @Field(() => String)
+  uniqueId: string;
 
   // When outcome = LINKED_AS_SECONDARY, expose the masked primary
   // email + which email landed on the secondary slot so the frontend

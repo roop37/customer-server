@@ -63,6 +63,7 @@ class OAuthService {
                 customerId: existingByGoogle._id.toString(),
                 accessToken: tokens.accessToken,
                 refreshToken: tokens.refreshToken,
+                uniqueId: tokens.uniqueId,
             };
         }
         // 2) Existing account by email match (primary or secondary). Link
@@ -85,6 +86,7 @@ class OAuthService {
                 customerId: existingByEmail._id.toString(),
                 accessToken: tokens.accessToken,
                 refreshToken: tokens.refreshToken,
+                uniqueId: tokens.uniqueId,
             };
         }
         // 3) Brand-new — open a pending signup. Client collects + verifies
@@ -118,24 +120,30 @@ class OAuthService {
      * login. Rate-limited per phone to keep OTP budget bounded.
      */
     async pendingSignupRequestOtp(input) {
-        const phone = input.phone.trim();
-        if (!(0, validations_1.isValidPhone)(phone)) {
+        const normalized = (0, validations_1.normalizeCustomerPhone)(input.phone);
+        if (!normalized) {
             throw new mercurius_1.ErrorWithProps("Invalid phone number");
         }
+        const { raw, e164 } = normalized;
         const pending = await (0, pending_signup_store_1.readPendingSignup)(input.pendingToken);
         if (!pending) {
             throw new mercurius_1.ErrorWithProps("Your sign-up session has expired. Please start again.", { code: auth_errors_1.CustomerAuthErrorCodes.PENDING_TOKEN_EXPIRED });
         }
-        const rlKey = `customer_otp_request:${phone}`;
+        const rlKey = `customer_otp_request:${e164}`;
         if (!(await (0, rateLimit_1.checkRateLimit)(rlKey))) {
             throw new mercurius_1.ErrorWithProps("Too many OTP requests for this number. Try again later.");
         }
         await (0, rateLimit_1.incrementRateLimit)(rlKey);
-        const existing = await customer_schema_1.CustomerModel.findOne({ phone })
+        const existing = await customer_schema_1.CustomerModel.findOne({
+            $or: [{ phoneE164: e164 }, { phone: e164 }, { phone: raw }],
+            isDeleted: false,
+        })
             .select("_id")
             .lean();
-        const otpId = await this.otp.generateOtp(phone, Boolean(existing));
-        await (0, pending_signup_store_1.updatePendingSignup)(input.pendingToken, { phone, otpId });
+        const otpId = await this.otp.generateOtp(e164, Boolean(existing));
+        // Always persist E.164 in pending — the verify step reads back from
+        // here and writes the customer doc.
+        await (0, pending_signup_store_1.updatePendingSignup)(input.pendingToken, { phone: e164, otpId });
         return { otpId };
     }
     /**
@@ -173,11 +181,18 @@ class OAuthService {
                 code: auth_errors_1.CustomerAuthErrorCodes.MISSING_REQUIRED_PROFILE_FIELDS,
             });
         }
-        const existing = await customer_schema_1.CustomerModel.findOne({ phone, isDeleted: false });
+        // `phone` from the pending entry is now always E.164 (post-D16). For
+        // pre-D16 pending entries that were created before this rollout, the
+        // dual-lookup still finds the legacy record.
+        const existing = await customer_schema_1.CustomerModel.findOne({
+            $or: [{ phoneE164: phone }, { phone }],
+            isDeleted: false,
+        });
         if (!existing) {
             // Case E — clean signup.
             const customer = await customer_schema_1.CustomerModel.create({
                 phone,
+                phoneE164: phone,
                 firstName,
                 lastName,
                 email: emailToUse,
@@ -211,6 +226,7 @@ class OAuthService {
                 customerId: customer._id.toString(),
                 accessToken: tokens.accessToken,
                 refreshToken: tokens.refreshToken,
+                uniqueId: tokens.uniqueId,
             };
         }
         // Phone matches an existing account → collision matrix kicks in.
@@ -248,6 +264,7 @@ class OAuthService {
                 customerId: existing._id.toString(),
                 accessToken: tokens.accessToken,
                 refreshToken: tokens.refreshToken,
+                uniqueId: tokens.uniqueId,
                 primaryEmailMasked: maskEmail(existing.email),
                 secondaryEmail: existing.secondaryEmail ?? emailToUse,
             };
@@ -276,6 +293,7 @@ class OAuthService {
             customerId: existing._id.toString(),
             accessToken: tokens.accessToken,
             refreshToken: tokens.refreshToken,
+            uniqueId: tokens.uniqueId,
             primaryEmailMasked: maskEmail(existing.email),
             secondaryEmail: emailToUse,
         };

@@ -10,6 +10,8 @@ import "reflect-metadata";
 import { buildTypeDefsAndResolvers } from "type-graphql";
 import { logger } from "./log/logger";
 import { resolvers as typedResolvers } from "./resolvers/index.resolver";
+import { registerInstagramOAuth } from "./routes/instagram-oauth.route";
+import { registerInternalOfflineOrderRoute } from "./routes/internal-offline-order.route";
 import { registerRazorpayWebhook } from "./routes/razorpay-webhook.route";
 import Context from "./types/context.type";
 import {
@@ -43,8 +45,23 @@ async function startServer() {
       field: "rawBody",
       global: false,
       encoding: false,
-      routes: ["/webhooks/razorpay"],
+      routes: ["/webhooks/razorpay", "/internal/offline-order/issue"],
     });
+
+    app.addContentTypeParser(
+      "application/x-www-form-urlencoded",
+      { parseAs: "string" },
+      (_request, body, done) => {
+        try {
+          done(
+            null,
+            Object.fromEntries(new URLSearchParams(String(body)))
+          );
+        } catch (error) {
+          done(error as Error, undefined);
+        }
+      }
+    );
 
     await app.register(helmet, { contentSecurityPolicy: isProduction });
 
@@ -177,6 +194,8 @@ async function startServer() {
     });
 
     registerRazorpayWebhook(app);
+    registerInternalOfflineOrderRoute(app);
+    registerInstagramOAuth(app);
 
     app.get("/", async (_req, res) => {
       res.status(200).send("Hoizr customer-server healthy");

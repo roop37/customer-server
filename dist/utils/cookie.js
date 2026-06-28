@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.readTokenFromRequest = exports.clearCustomerCookie = exports.setCustomerCookie = exports.ScannerCookieKeys = exports.CustomerCookieKeys = void 0;
+exports.readTokenFromRequest = exports.clearCustomerCookie = exports.setCustomerCookie = exports.buildCustomerCookieOptions = exports.ScannerCookieKeys = exports.CustomerCookieKeys = void 0;
 const environment_1 = require("./environment");
 const helper_1 = require("./helper");
 class CustomerCookieKeys {
@@ -22,26 +22,50 @@ ScannerCookieKeys.REFRESH_TOKEN = "scannerRefreshToken";
  */
 const REFRESH_COOKIE_MAX_AGE_SECONDS = 90 * 24 * 60 * 60;
 const cookieDomain = () => environment_1.EnvVars.values.COOKIE_DOMAIN || undefined;
-const productionCookieOptions = () => ({
-    maxAge: REFRESH_COOKIE_MAX_AGE_SECONDS,
+const productionCookieScopeOptions = (domain = cookieDomain()) => ({
     httpOnly: true,
     sameSite: "none",
     secure: true,
-    ...(cookieDomain() ? { domain: cookieDomain() } : {}),
+    ...(domain ? { domain } : {}),
     path: "/",
 });
-const developmentCookieOptions = () => ({
-    maxAge: REFRESH_COOKIE_MAX_AGE_SECONDS,
+const developmentCookieScopeOptions = () => ({
     httpOnly: true,
     sameSite: "lax",
     path: "/",
 });
+const buildCustomerCookieScopeOptions = (domain = cookieDomain(), production = helper_1.isProduction) => {
+    if (production || domain) {
+        return productionCookieScopeOptions(domain);
+    }
+    return developmentCookieScopeOptions();
+};
+const buildCustomerCookieOptions = (domain = cookieDomain(), production = helper_1.isProduction) => ({
+    maxAge: REFRESH_COOKIE_MAX_AGE_SECONDS,
+    ...buildCustomerCookieScopeOptions(domain, production),
+});
+exports.buildCustomerCookieOptions = buildCustomerCookieOptions;
+// Options that match a host-only cookie (no Domain attribute). Used to
+// evict cookies left over from pre-COOKIE_DOMAIN deploys, which got scoped
+// to the bare host (dev-customer.hoizr.com etc.) and now sit alongside the
+// new .hoizr.com-scoped cookies, confusing the Cookie header parser.
+const buildHostOnlyScopeOptions = () => helper_1.isProduction
+    ? { httpOnly: true, sameSite: "none", secure: true, path: "/" }
+    : { httpOnly: true, sameSite: "lax", path: "/" };
 const setCustomerCookie = (cookieKey, cookieValue, rep) => {
-    rep.setCookie(cookieKey, cookieValue, helper_1.isProduction ? productionCookieOptions() : developmentCookieOptions());
+    const domain = cookieDomain();
+    if (domain) {
+        rep.clearCookie(cookieKey, buildHostOnlyScopeOptions());
+    }
+    rep.setCookie(cookieKey, cookieValue, (0, exports.buildCustomerCookieOptions)(domain));
 };
 exports.setCustomerCookie = setCustomerCookie;
 const clearCustomerCookie = (cookieKey, rep) => {
-    rep.clearCookie(cookieKey, helper_1.isProduction ? productionCookieOptions() : developmentCookieOptions());
+    const domain = cookieDomain();
+    rep.clearCookie(cookieKey, buildCustomerCookieScopeOptions(domain));
+    if (domain) {
+        rep.clearCookie(cookieKey, buildHostOnlyScopeOptions());
+    }
 };
 exports.clearCustomerCookie = clearCustomerCookie;
 const readTokenFromRequest = (req, cookieKey) => {

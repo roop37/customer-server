@@ -1,37 +1,63 @@
 import {
+  AnalyticsEventType,
   ConfigTypeEnum,
+  Coupon,
   EventStatus,
-  LifecycleEmailType,
   LifecycleSmsType,
+  OrderDiscountType,
   OrderStatus,
+  PromoDiscountType,
   QueueNames,
   VerificationStatus,
 } from "@hoizr-technology/shared";
 import { getCachedConfigNumber } from "../../../utils/configs-cache";
-import { mongoose } from "@typegoose/typegoose";
+import { logger } from "../../../log/logger";
+import { getModelForClass, mongoose } from "@typegoose/typegoose";
+import { evaluateCoupon } from "./coupon-eval";
 import { Queue } from "bullmq";
 import crypto from "crypto";
 import { ErrorWithProps } from "mercurius";
 import { EnvVars } from "../../../utils/environment";
-import { enqueueLifecycleEmail } from "../../../utils/lifecycle.queue";
-import { getRazorpay } from "../../../utils/razorpay.client";
+import { signQrPayload } from "../../../utils/qr-hash";
+import { getRazorpayPayments } from "../../../utils/razorpay.client";
 import { RedisKeys, redisClient } from "../../../utils/redis";
 import { isAlphanumeric } from "../../../utils/validations";
 import CartService, {
   CartTicketRef,
 } from "../../cart/service/cart.service";
-import { CartHostGstContext } from "../../cart/service/cart-pricing";
+import {
+  CartHostGstContext,
+  CartLineForPricing,
+} from "../../cart/service/cart-pricing";
 import { CustomerModel } from "../../customer/schema/customer.schema";
 import { EventModel } from "../../event/schema/event.schema";
+import { guestlistService } from "../../guestlist/service/guestlist.service";
 import { PayoutModel } from "../../payout/schema/payout.schema";
 import { CreateOrderInput } from "../interfaces/order.input";
 import { RazorpayCheckoutPayload } from "../interfaces/order.objects";
 import { Order, OrderModel } from "../schema/order.schema";
+import { OfflineOrderModel } from "../schema/offline-order.schema";
+import { OfflineOrderMode } from "@hoizr-technology/shared";
+import { resolveCustomerForOrder } from "../../customer/service/customer-resolution.service";
+import { InvoiceModel } from "../schema/invoice.schema";
+import { generateSignedPdfUrl } from "../../../utils/cloudinary";
+import { InvoiceType } from "@hoizr-technology/shared";
+import { nanoid } from "nanoid";
+import {
+  createCustomerAuthTokens,
+  storeCustomerRefreshToken,
+} from "../../../utils/jwt";
 
 type CreateOrderServiceResult = {
   order: Order;
   checkout?: RazorpayCheckoutPayload;
 };
+
+// Same `coupons` collection main-server writes — customer-server reads it to
+// validate/redeem at checkout (Coupon class is shared).
+const CouponModel = getModelForClass(Coupon, {
+  schemaOptions: { timestamps: true, collection: "coupons" },
+});
 
 const postPurchaseQueue = new Queue(QueueNames.postPurchaseQueue, {
   connection: redisClient,
@@ -59,6 +85,24 @@ const lifecycleSmsQueue = new Queue(QueueNames.smsQueue, {
     backoff: { type: "exponential", delay: 5000 },
     removeOnComplete: true,
     removeOnFail: 50,
+  },
+});
+
+// Analytics ingest queue. tracking-server enqueues browser-side events
+// (pageView, cartCreated, checkoutTriggered, …) here after enriching them
+// with IP/UA/device. We enqueue the server-confirmed `orderPlaced` event —
+// the only reliable conversion signal — directly, bypassing tracking-server's
+// enrich (no request IP/UA available here), so we populate the funnel +
+// attribution fields explicitly from the persisted Order. The hoizr-workers
+// analyticsEventsWorker drains this queue into the AnalyticsEvent collection.
+// Best-effort: tracking is never allowed to block or fail an order.
+const analyticsEventsQueue = new Queue(QueueNames.analyticsEventsQueue, {
+  connection: redisClient,
+  defaultJobOptions: {
+    attempts: 2,
+    backoff: { type: "exponential", delay: 2000 },
+    removeOnComplete: { age: 60, count: 1000 },
+    removeOnFail: { age: 86400, count: 1000 },
   },
 });
 
@@ -170,11 +214,9 @@ class OrderService {
 
   private generateQrPayload(orderId: string, paymentId: string) {
     const payload = `hoizr:${orderId}:${paymentId}`;
-    const hash = crypto
-      .createHmac("sha256", EnvVars.values.ENCRYPTION_KEY)
-      .update(payload)
-      .digest("hex");
-    return { payload, hash };
+    // AUDIT-023: versioned signing — see utils/qr-hash.ts.
+    const { hash, version } = signQrPayload(payload);
+    return { payload, hash, version };
   }
 
   private assertCartReservationActive(reservedAt: string): Date {
@@ -362,7 +404,7 @@ class OrderService {
       if (storedAmountPaise === amountPaise) {
         return {
           razorpayOrderId: order.razorpayOrderId,
-          razorpayKeyId: EnvVars.values.RAZORPAY_KEY_ID,
+          razorpayKeyId: getRazorpayPayments().keyId,
           amount,
           currency: "INR",
           orderId,
@@ -375,9 +417,9 @@ class OrderService {
       order.razorpayOrderId = undefined;
     }
 
-    const razorpay = getRazorpay();
-    const rzpOrder = await razorpay.orders.create({
-      amount: amountPaise,
+    const razorpay = getRazorpayPayments();
+    const rzpOrder = await razorpay.createOrder({
+      amountPaise,
       currency: "INR",
       receipt: orderId,
       notes: { orderId, eventId, customerId },
@@ -390,7 +432,7 @@ class OrderService {
 
     return {
       razorpayOrderId: rzpOrder.id,
-      razorpayKeyId: EnvVars.values.RAZORPAY_KEY_ID,
+      razorpayKeyId: razorpay.keyId,
       amount,
       currency: "INR",
       orderId,
@@ -422,6 +464,410 @@ class OrderService {
     );
   }
 
+  /**
+   * Resolve + validate a coupon for an order being created. Throws a clear
+   * message if a code was supplied but can't be applied (so the customer never
+   * silently pays full price after expecting a discount). Returns null when no
+   * code was given.
+   */
+  private async resolveCouponForOrder(
+    event: any,
+    couponCode: string | undefined,
+    orderTickets: any[],
+    customerId: string | undefined
+  ): Promise<{ couponDiscountPaise: number; coupon: any } | null> {
+    if (!couponCode?.trim()) return null;
+    const code = couponCode.trim().toUpperCase();
+    const coupon = await CouponModel.findOne({
+      host: String(event.hostId),
+      code,
+    }).lean<any>();
+    if (!coupon)
+      throw new ErrorWithProps("That promo code isn't valid for this event");
+    // Event-scoped coupon (coupon.eventId set) is valid only for that event;
+    // a global host promo (no eventId) works for any of the host's events.
+    if (coupon.eventId && String(coupon.eventId) !== String(event._id))
+      throw new ErrorWithProps("That promo code isn't valid for this event");
+
+    const ticketLines = orderTickets.map((t) => ({
+      ticketId: t.ticketTypeId,
+      grossPaise:
+        Math.round(Number(t.unitPrice) * 100) *
+        Math.max(0, Math.trunc(t.quantity)),
+    }));
+    const usage: any[] = Array.isArray(coupon.usage) ? coupon.usage : [];
+    const customerUsageCount = customerId
+      ? usage.filter((u) => String(u.customer) === String(customerId)).length
+      : 0;
+    let isFirstSignedOrder: boolean | undefined;
+    if (coupon.couponUsageType === "FirstSignedOrder" && customerId) {
+      const prior = await OrderModel.countDocuments({
+        customerId,
+        orderStatus: {
+          $in: [OrderStatus.PAYMENT_SUCCESS, OrderStatus.CHECKED_IN],
+        },
+      });
+      isFirstSignedOrder = prior === 0;
+    }
+    const res = evaluateCoupon(coupon, {
+      ticketLines,
+      totalUsageCount: usage.length,
+      customerUsageCount,
+      isFirstSignedOrder,
+    });
+    if (!res.ok)
+      throw new ErrorWithProps(res.reason ?? "This coupon can't be applied");
+    return { couponDiscountPaise: res.discountPaise, coupon };
+  }
+
+  /** Frozen order snapshot for a redeemed coupon (PROMO discount). */
+  private buildCouponSnapshot(coupon: any, discountAmount: number) {
+    return {
+      discountType: OrderDiscountType.PROMO,
+      discountAmount,
+      promoData: {
+        couponId: String(coupon._id),
+        code: coupon.code,
+        discountType: coupon.promoCodeDiscountType,
+        discountValue: coupon.discountValue,
+        uptoAmount: coupon.uptoAmount,
+        discountAmount,
+      },
+    };
+  }
+
+  /**
+   * Idempotently record a coupon redemption once an order is CONFIRMED, and
+   * auto-deactivate the coupon when its overall usage count or sales limit is
+   * reached. Never throws — coupon bookkeeping must not break a paid order.
+   */
+  private async recordCouponRedemption(order: any): Promise<void> {
+    const promo = order?.appliedDiscount?.promoData;
+    if (!promo?.couponId) return;
+    const orderId = String(order._id);
+    const saleAmount = Number(order.subtotal ?? 0);
+    try {
+      await CouponModel.updateOne(
+        { _id: promo.couponId, "usage.orderId": { $ne: orderId } },
+        {
+          $push: {
+            usage: {
+              customer: order.customerId
+                ? String(order.customerId)
+                : undefined,
+              orderId,
+              email: order.guestInfo?.email,
+              phone: order.guestInfo?.phone,
+              name:
+                [order.guestInfo?.firstName, order.guestInfo?.lastName]
+                  .filter(Boolean)
+                  .join(" ") || undefined,
+              discountApplied: Number(order.discountAmount ?? 0),
+              saleAmount,
+              usedAt: new Date(),
+            },
+          },
+          $inc: { totalSalesUsed: saleAmount },
+        }
+      );
+      await CouponModel.updateOne({ _id: promo.couponId, isActive: true }, [
+        {
+          $set: {
+            isActive: {
+              $cond: [
+                {
+                  $or: [
+                    {
+                      $and: [
+                        { $ne: ["$maxUsage", null] },
+                        {
+                          $gte: [
+                            { $size: { $ifNull: ["$usage", []] } },
+                            "$maxUsage",
+                          ],
+                        },
+                      ],
+                    },
+                    {
+                      $and: [
+                        { $ne: ["$couponUsageSalesLimit", null] },
+                        {
+                          $gte: ["$totalSalesUsed", "$couponUsageSalesLimit"],
+                        },
+                      ],
+                    },
+                  ],
+                },
+                false,
+                true,
+              ],
+            },
+          },
+        },
+      ]);
+    } catch {
+      /* coupon bookkeeping is best-effort; the order is already confirmed */
+    }
+  }
+
+  /**
+   * Read-only promo-code validation for the checkout UI. Returns a soft
+   * result (never throws on an invalid code) with the discount + grand
+   * total before/after so the client can show the savings line. Reuses the
+   * exact same evaluator + pricing engine the order path uses, so a preview
+   * that says ₹X off is what the buyer is actually charged.
+   */
+  async previewCoupon(
+    input: {
+      eventId: string;
+      couponCode: string;
+      tickets: { ticketId: string; quantity: number }[];
+    },
+    customerId?: string
+  ): Promise<{
+    ok: boolean;
+    code: string;
+    reason?: string;
+    discountAmount: number;
+    ticketsSubtotal: number;
+    totalBefore: number;
+    totalAfter: number;
+    pricing?: ReturnType<CartService["computePricingForLines"]>;
+  }> {
+    const code = (input.couponCode ?? "").trim().toUpperCase();
+    const empty = {
+      ok: false,
+      code,
+      reason: "Enter a promo code",
+      discountAmount: 0,
+      ticketsSubtotal: 0,
+      totalBefore: 0,
+      totalAfter: 0,
+    };
+    if (!code) return empty;
+
+    const event = await EventModel.findOne({
+      _id: input.eventId,
+      isDeleted: false,
+      isVisible: true,
+      status: EventStatus.PUBLISHED,
+      adminPaused: { $ne: true },
+    }).lean();
+    if (!event) return { ...empty, reason: "Event not available" };
+
+    const ticketMap = new Map(
+      (event.tickets ?? []).map((t: any) => [String(t._id), t])
+    );
+    const orderTickets = (input.tickets ?? [])
+      .map((line) => {
+        const ref: any = ticketMap.get(line.ticketId);
+        if (!ref) return null;
+        const qty = Math.max(0, Math.trunc(Number(line.quantity) || 0));
+        if (qty <= 0) return null;
+        return {
+          ticketTypeId: line.ticketId,
+          quantity: qty,
+          unitPrice: Number(ref.ticketPrice ?? 0),
+        };
+      })
+      .filter(Boolean) as {
+      ticketTypeId: string;
+      quantity: number;
+      unitPrice: number;
+    }[];
+    if (orderTickets.length === 0)
+      return { ...empty, reason: "Select tickets to apply a promo code" };
+
+    const ticketRefs = new Map<string, CartTicketRef>(
+      (event.tickets ?? []).map((t: any) => [
+        String(t._id),
+        { ticketGST: t.ticketGST, gstRate: t.gstRate },
+      ])
+    );
+    const [applicationFeePercent, applicationFeeGstPercent, host] =
+      await Promise.all([
+        getCachedConfigNumber(ConfigTypeEnum.platformFeeOnEvent, 5),
+        getCachedConfigNumber(ConfigTypeEnum.gstOnPlatformFeeOnEvent, 18),
+        this.loadHostGstContextForEvent(event),
+      ]);
+    const pricingLines = orderTickets.map((t) => ({
+      ticketId: t.ticketTypeId,
+      quantity: t.quantity,
+      unitPrice: t.unitPrice,
+    }));
+    // Add-ons (extras) are NOT discounted by the coupon, but they ARE part of
+    // the taxable base that the platform fee + total are computed on. The
+    // preview input only carries tickets, so pull the reserved cart's extras
+    // from Redis — the SAME source createOrder prices against — so the
+    // previewed total reconciles with what the customer is actually charged.
+    // (Falls back to no extras if the cart reservation has lapsed.) Without
+    // this the preview dropped the add-on, showing a total LOWER than the
+    // Razorpay charge.
+    const storedCart = customerId
+      ? await this.cart.readStoredCart(customerId, input.eventId)
+      : null;
+    const extraPriceMap = new Map(
+      (event.extras ?? []).map((e: any) => [String(e._id), e])
+    );
+    const previewExtraLines: CartLineForPricing[] = (storedCart?.extras ?? [])
+      .map((line) => {
+        const ref: any = extraPriceMap.get(String(line.extraId));
+        if (!ref) return null;
+        const qty = Math.max(0, Math.trunc(Number(line.quantity) || 0));
+        if (qty <= 0) return null;
+        return { quantity: qty, unitPrice: Number(ref.price ?? 0) };
+      })
+      .filter(Boolean) as CartLineForPricing[];
+    // Tickets-only subtotal (pre-discount) kept distinct from baseline.grossAmount
+    // — the latter now includes extras in the taxable base, so it can't double as
+    // the "tickets subtotal" the API field name promises.
+    const ticketsOnlySubtotal = pricingLines.reduce(
+      (sum, l) => sum + l.unitPrice * Math.max(0, Math.trunc(l.quantity)),
+      0
+    );
+    const baseline = this.cart.computePricingForLines(
+      pricingLines,
+      previewExtraLines,
+      ticketRefs,
+      applicationFeePercent,
+      applicationFeeGstPercent,
+      host,
+      0
+    );
+    const baseFields = {
+      ticketsSubtotal: ticketsOnlySubtotal,
+      totalBefore: baseline.totalAmount,
+      totalAfter: baseline.totalAmount,
+    };
+
+    const coupon = await CouponModel.findOne({
+      host: String(event.hostId),
+      code,
+    }).lean<any>();
+    if (
+      !coupon ||
+      (coupon.eventId && String(coupon.eventId) !== String(event._id))
+    )
+      return {
+        ...empty,
+        ...baseFields,
+        reason: "That promo code isn't valid for this event",
+      };
+
+    const usage: any[] = Array.isArray(coupon.usage) ? coupon.usage : [];
+    const customerUsageCount = customerId
+      ? usage.filter((u) => String(u.customer) === String(customerId)).length
+      : 0;
+    let isFirstSignedOrder: boolean | undefined;
+    if (coupon.couponUsageType === "FirstSignedOrder" && customerId) {
+      const prior = await OrderModel.countDocuments({
+        customerId,
+        orderStatus: {
+          $in: [OrderStatus.PAYMENT_SUCCESS, OrderStatus.CHECKED_IN],
+        },
+      });
+      isFirstSignedOrder = prior === 0;
+    }
+    const ticketLines = orderTickets.map((t) => ({
+      ticketId: t.ticketTypeId,
+      grossPaise: Math.round(t.unitPrice * 100) * t.quantity,
+    }));
+    const res = evaluateCoupon(coupon, {
+      ticketLines,
+      totalUsageCount: usage.length,
+      customerUsageCount,
+      isFirstSignedOrder,
+    });
+    if (!res.ok)
+      return {
+        ...empty,
+        ...baseFields,
+        reason: res.reason ?? "This coupon can't be applied",
+      };
+
+    const discounted = this.cart.computePricingForLines(
+      pricingLines,
+      previewExtraLines,
+      ticketRefs,
+      applicationFeePercent,
+      applicationFeeGstPercent,
+      host,
+      res.discountPaise
+    );
+    return {
+      ok: true,
+      code,
+      discountAmount: discounted.discountAmount,
+      ticketsSubtotal: ticketsOnlySubtotal,
+      totalBefore: baseline.totalAmount,
+      totalAfter: discounted.totalAmount,
+      pricing: discounted,
+    };
+  }
+
+  /**
+   * Public, copyable promo codes for an event page. Returns only coupons the
+   * host marked `showToCustomers`, that are active + in their date window, and
+   * scoped either to THIS event or host-global (no eventId). `isActive` already
+   * reflects the auto-deactivation when usage/sales limits are hit.
+   */
+  async visibleCouponsForEvent(eventId: string): Promise<
+    {
+      code: string;
+      description?: string;
+      discountLabel: string;
+      minCartValue?: number;
+      endDate: Date;
+    }[]
+  > {
+    const event = await EventModel.findOne({
+      _id: eventId,
+      isDeleted: false,
+      isVisible: true,
+      status: EventStatus.PUBLISHED,
+    }).lean();
+    if (!event?.hostId) return [];
+
+    const now = new Date();
+    const coupons = await CouponModel.find({
+      host: String(event.hostId),
+      showToCustomers: true,
+      isActive: true,
+      startDate: { $lte: now },
+      endDate: { $gte: now },
+      $or: [
+        { eventId: { $in: [null, ""] } },
+        { eventId: { $exists: false } },
+        { eventId: String(eventId) },
+      ],
+    })
+      .sort({ createdAt: -1 })
+      .lean<any[]>();
+
+    const label = (c: any): string => {
+      const upto =
+        c.uptoAmount != null ? ` (up to ₹${Number(c.uptoAmount)})` : "";
+      switch (c.promoCodeDiscountType) {
+        case PromoDiscountType.Percentage:
+          return `${Number(c.discountValue ?? 0)}% OFF${upto}`;
+        case PromoDiscountType.FixedAmount:
+          return `₹${Number(c.discountValue ?? 0)} OFF`;
+        case PromoDiscountType.Free:
+          return "FREE";
+        default:
+          return "OFFER";
+      }
+    };
+
+    return coupons.map((c) => ({
+      code: c.code,
+      description: c.description ?? undefined,
+      discountLabel: label(c),
+      minCartValue: c.minCartValue ?? undefined,
+      endDate: c.endDate,
+    }));
+  }
+
   private async finalizeFreeOrder(
     customerId: string,
     event: any,
@@ -430,57 +876,59 @@ class OrderService {
     orderExtras: any[],
     pricing: ReturnType<CartService["computePricingForLines"]>,
     reservedAt: Date,
-    appliedConfigSnapshot: ReturnType<OrderService["buildConfigSnapshot"]>
+    appliedConfigSnapshot: ReturnType<OrderService["buildConfigSnapshot"]>,
+    appliedDiscount?: ReturnType<OrderService["buildCouponSnapshot"]>
   ): Promise<Order> {
+    // Idempotency: a double-submitted RSVP (double-click, or a retried
+    // mutation) must not mint two confirmed orders. A free booking is keyed by
+    // the cart reservation instant — same (customer, event, reservedAt) + same
+    // lines = the same booking, so return the already-finalised order instead
+    // of creating a duplicate. (Capacity is still protected by the atomic $inc
+    // guard below, so the worst case without this is a double-booking, never an
+    // oversell. Best-effort under truly-simultaneous submits — the deletion of
+    // the cart on first finalize closes the sequential-submit window.)
+    const existingFree = await OrderModel.findOne({
+      customerId,
+      eventId: event._id.toString(),
+      reservedAt,
+      orderStatus: OrderStatus.PAYMENT_SUCCESS,
+      isDeleted: false,
+    }).sort({ createdAt: -1 });
+    if (existingFree) {
+      const sameTickets =
+        (existingFree.tickets ?? []).length === orderTickets.length &&
+        orderTickets.every((line) =>
+          (existingFree.tickets ?? []).some(
+            (e: any) =>
+              e.ticketTypeId === line.ticketTypeId &&
+              Number(e.quantity ?? 0) === Number(line.quantity)
+          )
+        );
+      const sameExtras =
+        (existingFree.extras ?? []).length === orderExtras.length &&
+        orderExtras.every((line) =>
+          (existingFree.extras ?? []).some(
+            (e: any) =>
+              e.extraId === line.extraId &&
+              Number(e.quantity ?? 0) === Number(line.quantity)
+          )
+        );
+      if (sameTickets && sameExtras) {
+        return existingFree.toObject() as Order;
+      }
+    }
+
     const session = await mongoose.startSession();
     let createdOrder: any = null;
 
     try {
       await session.withTransaction(async () => {
         const latestEvent = await EventModel.findById(event._id)
-          .select("tickets extras")
+          .select("_id")
           .session(session)
           .lean();
         if (!latestEvent) {
           throw new ErrorWithProps("Event not available for booking");
-        }
-
-        const latestTickets = new Map(
-          (latestEvent.tickets ?? []).map((ticket: any) => [
-            String(ticket._id),
-            ticket,
-          ])
-        );
-        for (const line of orderTickets) {
-          const ticket = latestTickets.get(line.ticketTypeId);
-          if (
-            !ticket ||
-            Number(ticket.ticketSold ?? 0) + Number(line.quantity ?? 0) >
-              Number(ticket.ticketCapacity ?? 0)
-          ) {
-            throw new ErrorWithProps(
-              `${line.ticketName ?? "Ticket"} is no longer available in this quantity`
-            );
-          }
-        }
-
-        const latestExtras = new Map(
-          (latestEvent.extras ?? []).map((extra: any) => [
-            String(extra._id),
-            extra,
-          ])
-        );
-        for (const line of orderExtras) {
-          const extra = latestExtras.get(line.extraId);
-          if (
-            !extra ||
-            Number(extra.sold ?? 0) + Number(line.quantity ?? 0) >
-              Number(extra.quantity ?? 0)
-          ) {
-            throw new ErrorWithProps(
-              `${line.extraName ?? "Add-on"} is no longer available in this quantity`
-            );
-          }
         }
 
         const order = new OrderModel({
@@ -491,6 +939,8 @@ class OrderService {
           tickets: orderTickets,
           extras: orderExtras,
           subtotal: pricing.grossAmount,
+          discountAmount: pricing.discountAmount,
+          appliedDiscount,
           platformFee: pricing.applicationFee,
           platformFeeGst: pricing.platformFeeGst,
           totalAmount: pricing.totalAmount,
@@ -509,6 +959,14 @@ class OrderService {
           pageQuery: input.pageQuery,
           promoterId: input.promoterId,
           referralCode: input.referralCode,
+          // A ₹0 / RSVP offline payment link finalizes here (free path). Carry
+          // the offline link id + source exactly like the paid path so the
+          // post-purchase worker can flip the OfflineOrder LINK_SENT → PAID.
+          // (The offlineOrderId is validated by the IDOR guard in createOrder,
+          // which now runs before this free branch.)
+          ...(input.offlineOrderId
+            ? { offlineOrderId: input.offlineOrderId, source: "OFFLINE_LINK" }
+            : {}),
         });
 
         const paymentId = `free_${order._id.toString()}`;
@@ -516,23 +974,48 @@ class OrderService {
         order.razorpayPaymentId = paymentId;
         order.qrCodeData = qr.payload;
         order.qrCodeHash = qr.hash;
+        order.qrHashVersion = qr.version;
         await order.save({ session });
 
-        const ticketOps = orderTickets.map((line: any) => ({
-          updateOne: {
-            filter: { _id: event._id, "tickets._id": line.ticketTypeId },
-            update: { $inc: { "tickets.$.ticketSold": line.quantity } },
-          },
-        }));
-        const extraOps = orderExtras.map((line: any) => ({
-          updateOne: {
-            filter: { _id: event._id, "extras._id": line.extraId },
-            update: { $inc: { "extras.$.sold": line.quantity } },
-          },
-        }));
-
-        if (ticketOps.length || extraOps.length) {
-          await EventModel.bulkWrite([...ticketOps, ...extraOps], { session });
+        for (const line of orderTickets) {
+          const ticketId = String(line.ticketTypeId);
+          const r = await EventModel.updateOne(
+            {
+              _id: event._id,
+              "tickets._id": ticketId,
+              $expr: {
+                $let: {
+                  vars: { t: { $arrayElemAt: [{ $filter: { input: "$tickets", as: "t", cond: { $eq: ["$$t._id", ticketId] } } }, 0] } },
+                  in: { $lte: [{ $add: ["$$t.ticketSold", Number(line.quantity)] }, "$$t.ticketCapacity"] },
+                },
+              },
+            },
+            { $inc: { "tickets.$.ticketSold": Number(line.quantity) } },
+            { session }
+          );
+          if (r.matchedCount === 0) {
+            throw new ErrorWithProps(`${line.ticketName ?? "Ticket"} is no longer available`);
+          }
+        }
+        for (const line of orderExtras) {
+          const extraId = String(line.extraId);
+          const r = await EventModel.updateOne(
+            {
+              _id: event._id,
+              "extras._id": extraId,
+              $expr: {
+                $let: {
+                  vars: { e: { $arrayElemAt: [{ $filter: { input: "$extras", as: "e", cond: { $eq: ["$$e._id", extraId] } } }, 0] } },
+                  in: { $lte: [{ $add: ["$$e.sold", Number(line.quantity)] }, "$$e.quantity"] },
+                },
+              },
+            },
+            { $inc: { "extras.$.sold": Number(line.quantity) } },
+            { session }
+          );
+          if (r.matchedCount === 0) {
+            throw new ErrorWithProps(`${line.extraName ?? "Add-on"} is no longer available`);
+          }
         }
 
         const now = new Date();
@@ -560,8 +1043,17 @@ class OrderService {
       await session.endSession();
     }
 
-    await this.cart.finalizeCartForOrder(customerId, event._id.toString());
+    // Best-effort cart cleanup outside the transaction — a Redis blip here
+    // must NOT throw out of an already-finalised free order (which would rob
+    // the buyer of their QR e-ticket comms below). Mirrors the paid path.
+    try {
+      await this.cart.finalizeCartForOrder(customerId, event._id.toString());
+    } catch {
+      // Cart cleanup is advisory; the free order is already finalised.
+    }
     if (createdOrder?._id) {
+      // Free orders confirm immediately → record the coupon redemption now.
+      await this.recordCouponRedemption(createdOrder);
       await postPurchaseQueue.add("APPLY_FOLLOWS_AND_SALES_LOG", {
         orderId: createdOrder._id.toString(),
       });
@@ -569,8 +1061,495 @@ class OrderService {
         eventId: event._id.toString(),
       });
       await this.dispatchOrderConfirmationComms(createdOrder);
+      // Offline guestlist claim → also put the buyer on the host's guestlist
+      // (reusing this order's QR as the single door token). Best-effort + only
+      // fires for offline-link claims of a Guestlist-category ticket.
+      try {
+        await guestlistService.ensureOfflineGuestlistEntry({
+          order: createdOrder,
+          event,
+        });
+      } catch (err) {
+        console.error("ensureOfflineGuestlistEntry failed", err);
+      }
     }
     return createdOrder as Order;
+  }
+
+  /**
+   * Guest checkout: a not-logged-in buyer places an order with just their
+   * contact details + selected tickets. Phone is the identity — if an
+   * account already exists we attach the order to it (and the client shows
+   * "we found your account"); otherwise we auto-create a PHONE account so the
+   * tickets live somewhere they can later log into. `guestInfo` is always
+   * stored so guest purchases are countable. Reuses the EXACT online order
+   * flow (seed cart → createOrder), so no money-path logic is duplicated.
+   */
+  /**
+   * @deprecated REMOVED from the API (2026-06-22): guest checkout no longer
+   * exists — a customer must be logged in to place ANY order. The
+   * createGuestOrder GraphQL mutation has been deleted; this method has NO
+   * caller and must not be re-exposed. Offline payment links now require login
+   * and pay through the authed createOrder (which accepts offlineOrderId).
+   */
+  async createGuestOrder(input: {
+    eventId: string;
+    tickets: { ticketId: string; quantity: number }[];
+    extras?: { extraId: string; quantity: number }[];
+    firstName: string;
+    lastName: string;
+    email: string;
+    phone: string;
+    notifyMe?: boolean;
+    offlineOrderId?: string;
+    utm?: any;
+    pageQuery?: string;
+    referralCode?: string;
+    promoterId?: string;
+    couponCode?: string;
+  }): Promise<{
+    result: CreateOrderServiceResult;
+    accountFound: boolean;
+    accountEmail?: string;
+    loggedIn: boolean;
+    session?: { accessToken: string; refreshToken: string; uniqueId: string };
+  }> {
+    if (!input.tickets?.length && !input.extras?.length) {
+      throw new ErrorWithProps("Select at least one ticket");
+    }
+    // Add-ons can't be bought on their own — require at least one ticket.
+    if (!input.tickets?.length && (input.extras?.length ?? 0) > 0) {
+      throw new ErrorWithProps(
+        "Add-ons can only be purchased together with a ticket. Add at least one ticket to continue."
+      );
+    }
+
+    const resolved = await resolveCustomerForOrder({
+      phone: input.phone,
+      email: input.email,
+      firstName: input.firstName,
+      lastName: input.lastName,
+      createIfMissing: true,
+    });
+    if (!resolved.customerId) {
+      throw new ErrorWithProps(
+        "Couldn't start checkout — please check your name, email and phone."
+      );
+    }
+
+    // NOTE: a guest purchase does exactly four things — take the contact
+    // details, create the account if the phone is new, place the order, and
+    // (for a freshly created account) log the buyer in. We deliberately do
+    // NOT silently flip marketing opt-ins here: subscribing someone to
+    // WhatsApp/email from a ticket purchase they didn't consent to is a
+    // surprise side effect. Marketing preferences are set explicitly from the
+    // profile/preferences surfaces, not as a hidden effect of checkout.
+
+    // Seed the cart for this customer, then run the normal order flow.
+    await this.cart.setCart(resolved.customerId, {
+      eventId: input.eventId,
+      tickets: input.tickets,
+      extras: input.extras ?? [],
+    });
+
+    const result = await this.createOrder(resolved.customerId, {
+      eventId: input.eventId,
+      guestInfo: {
+        firstName: input.firstName,
+        lastName: input.lastName,
+        email: input.email,
+        phone: input.phone,
+      },
+      utm: input.utm,
+      pageQuery: input.pageQuery,
+      referralCode: input.referralCode,
+      promoterId: input.promoterId,
+      couponCode: input.couponCode,
+    });
+
+    // Offline payment link → link the created order to its OfflineOrder
+    // exactly (no fuzzy matching). The OfflineOrder flips to PAID when the
+    // order finalises (post-purchase worker reads Order.offlineOrderId).
+    if (input.offlineOrderId && result.order?._id) {
+      await OrderModel.updateOne(
+        { _id: result.order._id },
+        {
+          $set: { offlineOrderId: input.offlineOrderId, source: "OFFLINE_LINK" },
+        }
+      );
+    }
+
+    // Always issue a session after guest checkout — the buyer just proved their
+    // identity by completing payment. Existing accounts skip OTP here; that's
+    // intentional (the order is already linked to their account and they've
+    // demonstrated payment-method ownership). Uses the same token utils as the
+    // OTP-verify path; the auth flow is untouched.
+    const uniqueId = nanoid();
+    const { accessToken, refreshToken } = createCustomerAuthTokens({
+      customer: resolved.customerId,
+      version: 0,
+      uniqueId,
+    });
+    await storeCustomerRefreshToken(resolved.customerId, uniqueId, refreshToken);
+    const session = { accessToken, refreshToken, uniqueId };
+
+    return {
+      result,
+      accountFound: resolved.existed,
+      accountEmail: resolved.existed ? resolved.accountEmail : undefined,
+      loggedIn: Boolean(session),
+      session,
+    };
+  }
+
+  /**
+   * Resolve a host's offline payment-link short code → prefill payload for the
+   * customer checkout (hoizr.com/t/<code>). Public; returns enough to render a
+   * locked, prefilled order. `alreadyPaid`/`expired` let the page show the
+   * right state instead of letting a stale link double-charge.
+   */
+  async resolveOfflinePaymentLink(shortCode: string) {
+    if (!shortCode || !/^[A-Za-z0-9_-]{4,40}$/.test(shortCode)) {
+      throw new ErrorWithProps("Invalid link");
+    }
+    const offline: any = await OfflineOrderModel.findOne({
+      shortCode,
+      mode: OfflineOrderMode.PAYMENT_LINK,
+      isDeleted: { $ne: true },
+    }).lean();
+    if (!offline) throw new ErrorWithProps("This link is no longer valid");
+
+    // Record the FIRST open so the host can tell "sent but never opened" from
+    // "opened, not yet paid". Guarded so only the first resolve stamps it;
+    // best-effort (never block rendering the link on this write).
+    if (!offline.openedAt) {
+      OfflineOrderModel.updateOne(
+        { _id: offline._id, openedAt: { $exists: false } },
+        { $set: { openedAt: new Date() } }
+      ).catch(() => {});
+    }
+
+    const event: any = await EventModel.findById(offline.eventId)
+      .select("title slug eventFlyer horizontalFlyer")
+      .lean();
+
+    const alreadyPaid =
+      offline.status === "PAID" || !!offline.linkedOrderId;
+    const expired =
+      !!offline.linkExpiresAt && new Date(offline.linkExpiresAt) < new Date();
+
+    return {
+      offlineOrderId: String(offline._id),
+      eventId: String(offline.eventId),
+      eventTitle: event?.title,
+      eventFlyer: event?.horizontalFlyer || event?.eventFlyer,
+      eventSlug: event?.slug,
+      lines: (offline.lines ?? []).map((l: any) => ({
+        itemId: l.itemId,
+        name: l.name,
+        quantity: l.quantity,
+        unitPrice: l.unitPrice,
+        isExtra: !!l.isExtra,
+      })),
+      amountTotal: offline.amountTotal ?? 0,
+      customerFirstName: offline.customerFirstName,
+      customerLastName: offline.customerLastName,
+      customerEmail: offline.customerEmail,
+      customerPhone: offline.customerPhone,
+      alreadyPaid,
+      expired,
+    };
+  }
+
+  /**
+   * Offline-ticket feature: create a real, scannable Order for a host-issued
+   * offline ticket. Called ONLY by the HMAC-authed internal route (the host
+   * isn't a customer, so main-server brokers it). Reuses the exact same
+   * pricing + inventory + QR + fan-out path as an online order, so accounting
+   * and the door experience are identical — just no Razorpay leg. Guest order
+   * (no customerId); links back via `OfflineOrder.issuedOrderId`. Idempotent.
+   */
+  async createIssuedOfflineOrder(
+    offlineOrderId: string
+  ): Promise<{ orderId: string }> {
+    if (!isAlphanumeric(offlineOrderId)) {
+      throw new ErrorWithProps("Invalid offline order id");
+    }
+    const offline: any = await OfflineOrderModel.findById(offlineOrderId).lean();
+    if (!offline) throw new ErrorWithProps("Offline order not found");
+    if (offline.mode !== OfflineOrderMode.ISSUED) {
+      throw new ErrorWithProps("Not an issued offline order");
+    }
+    if (offline.issuedOrderId) {
+      return { orderId: String(offline.issuedOrderId) }; // idempotent
+    }
+
+    const event: any = await EventModel.findById(offline.eventId).lean();
+    if (!event) throw new ErrorWithProps("Event not found");
+
+    const ticketMap = new Map(
+      (event.tickets ?? []).map((t: any) => [String(t._id), t])
+    );
+    const extraMap = new Map(
+      (event.extras ?? []).map((e: any) => [String(e._id), e])
+    );
+    const orderTickets: any[] = [];
+    const orderExtras: any[] = [];
+    for (const line of offline.lines ?? []) {
+      if (line.isExtra) {
+        const ref: any = extraMap.get(String(line.itemId));
+        if (!ref) throw new ErrorWithProps(`Add-on not available: ${line.name}`);
+        const available = Number(ref.quantity ?? 0) - Number(ref.sold ?? 0);
+        if (line.quantity > available) {
+          throw new ErrorWithProps(`${ref.name ?? line.name} is sold out`);
+        }
+        const unitPrice = Number(ref.price ?? line.unitPrice ?? 0);
+        orderExtras.push({
+          extraId: String(line.itemId),
+          extraName: String(ref.name ?? line.name),
+          quantity: line.quantity,
+          unitPrice,
+          totalPrice: +(unitPrice * line.quantity).toFixed(2),
+        });
+      } else {
+        const ref: any = ticketMap.get(String(line.itemId));
+        if (!ref) throw new ErrorWithProps(`Ticket not available: ${line.name}`);
+        const remaining =
+          Number(ref.ticketCapacity ?? 0) - Number(ref.ticketSold ?? 0);
+        if (line.quantity > remaining) {
+          throw new ErrorWithProps(`${ref.ticketName ?? line.name} is sold out`);
+        }
+        const unitPrice = Number(ref.ticketPrice ?? line.unitPrice ?? 0);
+        orderTickets.push({
+          ticketTypeId: String(line.itemId),
+          ticketName: String(ref.ticketName ?? line.name),
+          // Authoritative per-day tag from the event ticket (null single-day).
+          dayId: ref.dayId ?? undefined,
+          quantity: line.quantity,
+          unitPrice,
+          totalPrice: +(unitPrice * line.quantity).toFixed(2),
+        });
+      }
+    }
+    if (!orderTickets.length && !orderExtras.length) {
+      throw new ErrorWithProps("Offline order has no valid lines");
+    }
+
+    const ticketRefs = new Map<string, CartTicketRef>(
+      (event.tickets ?? []).map((t: any) => [
+        String(t._id),
+        { ticketGST: t.ticketGST, gstRate: t.gstRate },
+      ])
+    );
+    const [
+      applicationFeePercent,
+      applicationFeeGstPercent,
+      hoizrCommissionGstPercent,
+      host,
+    ] = await Promise.all([
+      getCachedConfigNumber(ConfigTypeEnum.platformFeeOnEvent, 5),
+      getCachedConfigNumber(ConfigTypeEnum.gstOnPlatformFeeOnEvent, 18),
+      getCachedConfigNumber(ConfigTypeEnum.gstOnComission, 18),
+      this.loadHostGstContextForEvent(event),
+    ]);
+    const pricing = this.cart.computePricingForLines(
+      orderTickets.map((t) => ({
+        ticketId: t.ticketTypeId,
+        quantity: t.quantity,
+        unitPrice: t.unitPrice,
+      })),
+      orderExtras.map((e) => ({ quantity: e.quantity, unitPrice: e.unitPrice })),
+      ticketRefs,
+      applicationFeePercent,
+      applicationFeeGstPercent,
+      host
+    );
+
+    const selectedPlan = event.pricingSnapshot;
+    const aiCommissionPct =
+      typeof event.aiSelectedCommissionPct === "number"
+        ? event.aiSelectedCommissionPct
+        : undefined;
+    let hoizrCommissionPercent: number;
+    if (typeof aiCommissionPct === "number") {
+      hoizrCommissionPercent = aiCommissionPct;
+    } else if (selectedPlan) {
+      hoizrCommissionPercent = Number(selectedPlan.commissionRate ?? 0);
+    } else if (Number(pricing.grossAmount ?? 0) <= 0) {
+      // Free / RSVP event — nothing is being charged, so there's no commission
+      // to take and no pricing plan is required. (A paid event with unpriced
+      // tickets still errors below because its gross is > 0.)
+      hoizrCommissionPercent = 0;
+    } else {
+      throw new ErrorWithProps(
+        "Event is not priced: select a pricing plan before issuing tickets."
+      );
+    }
+    const aiBoostFeeRupees = Number(
+      event.aiSelectedExtraAmount ?? selectedPlan?.upfrontFee ?? 0
+    );
+    const aiBoostGstPercent = await getCachedConfigNumber(
+      ConfigTypeEnum.gstOnAiBoost,
+      18
+    );
+    const appliedConfigSnapshot = this.buildConfigSnapshot({
+      platformFeePercent: applicationFeePercent,
+      platformFeeGstPercent: applicationFeeGstPercent,
+      hoizrCommissionPercent,
+      hoizrCommissionGstPercent,
+      ticketGstPercent: pricing.taxesPercent,
+      host,
+      aiBoost:
+        aiBoostFeeRupees > 0
+          ? {
+              feeRupees: aiBoostFeeRupees,
+              gstPercent: aiBoostGstPercent,
+              adjustmentMode: event.feeSettlementMode,
+              offerId: event.selectedAiBoostGenerationId,
+            }
+          : undefined,
+    });
+
+    // If a customer already exists for this phone/email, attach the order to
+    // their account (don't auto-create for an offline issue — the buyer
+    // didn't opt in). guestInfo is always recorded too.
+    const resolved = await resolveCustomerForOrder({
+      phone: offline.customerPhone,
+      email: offline.customerEmail,
+      createIfMissing: false,
+    });
+
+    const session = await mongoose.startSession();
+    let createdOrder: any = null;
+    try {
+      await session.withTransaction(async () => {
+        const latestEvent = await EventModel.findById(event._id)
+          .select("_id")
+          .session(session)
+          .lean();
+        if (!latestEvent) throw new ErrorWithProps("Event not available");
+
+        const order = new OrderModel({
+          customerId: resolved.customerId,
+          guestInfo: {
+            firstName: offline.customerFirstName,
+            lastName: offline.customerLastName,
+            email: offline.customerEmail,
+            phone: offline.customerPhone,
+          },
+          eventId: String(event._id),
+          businessId: event.hostId,
+          tickets: orderTickets,
+          extras: orderExtras,
+          subtotal: pricing.grossAmount,
+          platformFee: pricing.applicationFee,
+          platformFeeGst: pricing.platformFeeGst,
+          totalAmount: pricing.totalAmount,
+          applicationFeePercent: pricing.applicationFeePercent,
+          taxes: pricing.taxes,
+          taxesPercent: pricing.taxesPercent,
+          hoizrCommission: 0,
+          hoizrCommissionPercent,
+          razorpayFee: 0,
+          finalDeclaredCommission: 0,
+          finalDeclaredOfferAmount: 0,
+          appliedConfigSnapshot,
+          orderStatus: OrderStatus.PAYMENT_SUCCESS,
+          reservedAt: new Date(),
+          source: "OFFLINE_ISSUED",
+          offlineOrderId: String(offline._id),
+        });
+        const paymentId = `offline_${order._id.toString()}`;
+        const qr = this.generateQrPayload(order._id.toString(), paymentId);
+        order.razorpayPaymentId = paymentId;
+        order.qrCodeData = qr.payload;
+        order.qrCodeHash = qr.hash;
+        order.qrHashVersion = qr.version;
+        await order.save({ session });
+
+        for (const line of orderTickets) {
+          const ticketId = String(line.ticketTypeId);
+          const r = await EventModel.updateOne(
+            {
+              _id: event._id,
+              "tickets._id": ticketId,
+              $expr: {
+                $let: {
+                  vars: { t: { $arrayElemAt: [{ $filter: { input: "$tickets", as: "t", cond: { $eq: ["$$t._id", ticketId] } } }, 0] } },
+                  in: { $lte: [{ $add: ["$$t.ticketSold", Number(line.quantity)] }, "$$t.ticketCapacity"] },
+                },
+              },
+            },
+            { $inc: { "tickets.$.ticketSold": Number(line.quantity) } },
+            { session }
+          );
+          if (r.matchedCount === 0) {
+            throw new ErrorWithProps(`${line.ticketName ?? "Ticket"} is sold out`);
+          }
+        }
+        for (const line of orderExtras) {
+          const extraId = String(line.extraId);
+          const r = await EventModel.updateOne(
+            {
+              _id: event._id,
+              "extras._id": extraId,
+              $expr: {
+                $let: {
+                  vars: { e: { $arrayElemAt: [{ $filter: { input: "$extras", as: "e", cond: { $eq: ["$$e._id", extraId] } } }, 0] } },
+                  in: { $lte: [{ $add: ["$$e.sold", Number(line.quantity)] }, "$$e.quantity"] },
+                },
+              },
+            },
+            { $inc: { "extras.$.sold": Number(line.quantity) } },
+            { session }
+          );
+          if (r.matchedCount === 0) {
+            throw new ErrorWithProps(`${line.extraName ?? "Add-on"} is sold out`);
+          }
+        }
+
+        const now = new Date();
+        await EventModel.updateOne(
+          { _id: event._id, firstSaleAt: { $exists: false } },
+          { $set: { firstSaleAt: now } },
+          { session }
+        );
+        await EventModel.updateOne(
+          { _id: event._id },
+          { $set: { lastSaleAt: now } },
+          { session }
+        );
+
+        // Claim the offline order → this order. The {issuedOrderId:$exists:false}
+        // guard makes a concurrent retry abort (modifiedCount 0 → throw →
+        // rollback) so we never double-issue.
+        const claim = await OfflineOrderModel.updateOne(
+          { _id: offline._id, issuedOrderId: { $exists: false } },
+          { $set: { issuedOrderId: String(order._id) } },
+          { session }
+        );
+        if (claim.modifiedCount !== 1) {
+          throw new ErrorWithProps(
+            "This offline order was already issued."
+          );
+        }
+
+        createdOrder = order.toObject();
+      });
+    } finally {
+      await session.endSession();
+    }
+
+    if (createdOrder?._id) {
+      await postPurchaseQueue.add("APPLY_FOLLOWS_AND_SALES_LOG", {
+        orderId: createdOrder._id.toString(),
+      });
+      await soldOutTriggerQueue.add("CHECK_AFTER_SALE", {
+        eventId: String(event._id),
+      });
+      await this.dispatchOrderConfirmationComms(createdOrder);
+    }
+    return { orderId: String(createdOrder._id) };
   }
 
   private async dispatchOrderConfirmationComms(order: any): Promise<void> {
@@ -580,27 +1559,15 @@ class OrderService {
           .lean()
       : null;
 
-    const recipientEmail = customer?.email ?? order.guestInfo?.email ?? "";
     const recipientPhone = customer?.phone ?? order.guestInfo?.phone ?? "";
-    const recipientName =
-      [customer?.firstName, customer?.lastName].filter(Boolean).join(" ") ||
-      [order.guestInfo?.firstName, order.guestInfo?.lastName]
-        .filter(Boolean)
-        .join(" ");
 
-    if (recipientEmail) {
-      await enqueueLifecycleEmail(
-        LifecycleEmailType.CUSTOMER_ORDER_PLACED,
-        recipientEmail,
-        recipientName,
-        {
-          orderId: order._id.toString(),
-          totalAmount: Number(order.totalAmount ?? 0),
-          eventId: order.eventId?.toString?.() ?? String(order.eventId),
-        }
-      );
-    }
-
+    // NOTE: the order-confirmation EMAIL is no longer sent from here. Every
+    // confirmed order — free/RSVP, paid, offline — now gets the single rich
+    // QR e-ticket email (CUSTOMER_ORDER_CONFIRMED_WITH_TICKET) from
+    // hoizr-workers: paid via runPaidOrderFanout, free via the post-purchase
+    // worker's dispatchFreeOrderConfirmation. Sending the old bare
+    // CUSTOMER_ORDER_PLACED email here would double-mail the customer. Only
+    // the SMS + analytics fire from this path now.
     if (recipientPhone) {
       await lifecycleSmsQueue.add(LifecycleSmsType.CUSTOMER_ORDER_PLACED, {
         phoneNumber: recipientPhone,
@@ -610,6 +1577,72 @@ class OrderService {
           .toUpperCase()}. Check email/app for your QR.`,
       });
     }
+
+    // Server-side conversion event. Every confirmed-order path (free,
+    // paid-webhook, guest, offline) converges here, so this is the single
+    // reliable point to fire `orderPlaced` into the analytics funnel.
+    // Best-effort only — a tracking failure must never throw out of order
+    // confirmation, so the whole block is swallowed.
+    try {
+      await this.enqueueOrderPlacedAnalytics(order);
+    } catch (err: any) {
+      logger.warn({
+        message: "analytics:orderPlaced enqueue failed (non-blocking)",
+        orderId: order?._id?.toString?.(),
+        stack: err?.stack,
+      });
+    }
+  }
+
+  /**
+   * Enqueue the canonical `orderPlaced` AnalyticsEvent. This BYPASSES the
+   * tracking-server enrich step (we have no request IP / User-Agent here),
+   * so the funnel + attribution fields are populated explicitly from the
+   * persisted Order: the stored `utm` block, the host (`businessId`), and
+   * — when the client captured them at checkout — the browsing `sessionId`
+   * / visitor id, so this conversion stitches onto the same session as the
+   * earlier pageView/cart events. The hoizr-workers analyticsEventsWorker
+   * writes the payload straight to the AnalyticsEvent collection.
+   */
+  private async enqueueOrderPlacedAnalytics(order: any): Promise<void> {
+    const utm = order.utm ?? {};
+    const ticketCount = (order.tickets ?? []).reduce(
+      (sum: number, t: any) => sum + Number(t?.quantity ?? 0),
+      0
+    );
+    const isGuest = Boolean(order.guestInfo) && !order.customerId;
+
+    const payload: Record<string, any> = {
+      eventType: AnalyticsEventType.OrderPlaced,
+      orderId: order._id?.toString?.() ?? String(order._id),
+      eventId: order.eventId?.toString?.() ?? String(order.eventId),
+      hostId: order.businessId?.toString?.() ?? order.businessId,
+      customerId: order.customerId?.toString?.() ?? order.customerId,
+
+      utmSource: utm.utmSource,
+      utmMedium: utm.utmMedium,
+      utmCampaign: utm.utmCampaign,
+      utmContent: utm.utmContent,
+      utmTerm: utm.utmTerm,
+
+      app: "customer-server",
+      clientTimestamp: new Date().toISOString(),
+      metadata: {
+        totalAmount: Number(order.totalAmount ?? 0),
+        ticketCount,
+        isGuest,
+      },
+    };
+
+    // Carry through attribution signals only when the order actually stored
+    // them — keeps the payload clean and avoids writing empty fields.
+    if (order.trafficSource) payload.trafficSource = order.trafficSource;
+    if (order.sessionId) payload.sessionId = order.sessionId;
+    if (order.clientVisitorId) payload.clientVisitorId = order.clientVisitorId;
+
+    // Use the same job name tracking-server uses so the worker's routing /
+    // dashboards treat customer-server-emitted events identically.
+    await analyticsEventsQueue.add("analytics-event", payload);
   }
 
   async createOrder(
@@ -628,6 +1661,13 @@ class OrderService {
     const stored = await this.cart.readStoredCart(customerId, input.eventId);
     if (!stored || (!stored.tickets.length && !stored.extras.length)) {
       throw new ErrorWithProps("Cart is empty or expired");
+    }
+    // Add-ons are not standalone products — they can only be bought
+    // alongside a ticket. Block an extras-only checkout.
+    if (stored.tickets.length === 0 && stored.extras.length > 0) {
+      throw new ErrorWithProps(
+        "Add-ons can only be purchased together with a ticket. Add at least one ticket to continue."
+      );
     }
     const reservedAt = this.assertCartReservationActive(stored.reservedAt);
     this.assertEventBookable(event);
@@ -689,12 +1729,15 @@ class OrderService {
         Number(ref.ticketCapacity ?? 0) - Number(ref.ticketSold ?? 0);
       if (line.quantity > remainingCapacity) {
         throw new ErrorWithProps(
-          `${ref.ticketName} is no longer available in this quantity`
+          `"${ref.ticketName}" is in high demand right now and the quantity you picked was just snapped up. Please wait a moment and try again.`
         );
       }
       return {
         ticketTypeId: line.ticketId,
         ticketName: String(ref.ticketName ?? "Ticket"),
+        // Snapshot the per-day tag so the scanner reads it off the order line
+        // without re-joining the event (null on single-day events).
+        dayId: ref.dayId ?? undefined,
         quantity: line.quantity,
         unitPrice,
         totalPrice: +(unitPrice * line.quantity).toFixed(2),
@@ -732,6 +1775,78 @@ class OrderService {
       };
     });
 
+    // Per-user ticket cap (maxTicketPerUser). The per-line check above bounds a
+    // SINGLE order; this bounds the customer's CUMULATIVE confirmed tickets for
+    // each ticket type, so a buyer can't grab the whole allocation across
+    // repeat orders (notably free RSVPs). Refunded / cancelled / superseded /
+    // pending orders don't count. Best-effort under high concurrency (two
+    // simultaneous orders could both pass), but capacity oversell stays fully
+    // protected by the atomic $inc guard at finalize.
+    const cappedLines = orderTickets.filter((line) => {
+      const ref = ticketMap.get(line.ticketTypeId);
+      return ref?.maxTicketPerUser && Number(ref.maxTicketPerUser) > 0;
+    });
+    if (cappedLines.length) {
+      const priorAgg = await OrderModel.aggregate([
+        {
+          $match: {
+            customerId,
+            eventId: input.eventId,
+            orderStatus: {
+              $in: [OrderStatus.PAYMENT_SUCCESS, OrderStatus.CHECKED_IN],
+            },
+            isDeleted: false,
+          },
+        },
+        { $unwind: "$tickets" },
+        {
+          $group: {
+            _id: "$tickets.ticketTypeId",
+            qty: { $sum: "$tickets.quantity" },
+          },
+        },
+      ]);
+      const priorByType = new Map<string, number>(
+        priorAgg.map((r: any) => [String(r._id), Number(r.qty ?? 0)])
+      );
+      for (const line of cappedLines) {
+        const ref = ticketMap.get(line.ticketTypeId)!;
+        const cap = Number(ref.maxTicketPerUser);
+        const prior = priorByType.get(line.ticketTypeId) ?? 0;
+        if (prior + Number(line.quantity) > cap) {
+          const remaining = Math.max(0, cap - prior);
+          throw new ErrorWithProps(
+            remaining === 0
+              ? `You've reached the limit of ${cap} "${ref.ticketName}" per person.`
+              : `You can book at most ${cap} "${ref.ticketName}" per person — you already have ${prior}, so you can add ${remaining} more.`
+          );
+        }
+      }
+    }
+
+    // Venue-wide capacity guard. Per-ticket caps can sum higher than the
+    // venue allows (e.g. 100 GA + 50 VIP at a 120-cap venue). Defends
+    // against the rare case where maxCapacity was lowered between cart
+    // reservation and order placement — cart.assertLatestInventoryStillFits
+    // already enforces this at reservation time.
+    const eventMaxCapacity = Number((event as any).maxCapacity ?? 0);
+    if (eventMaxCapacity > 0) {
+      const allTickets = (event.tickets ?? []) as any[];
+      const totalSold = allTickets.reduce(
+        (sum, t) => sum + Number(t.ticketSold ?? 0),
+        0
+      );
+      const totalDesired = orderTickets.reduce(
+        (sum, t) => sum + t.quantity,
+        0
+      );
+      if (totalSold + totalDesired > eventMaxCapacity) {
+        throw new ErrorWithProps(
+          `This event has reached its venue capacity of ${eventMaxCapacity}.`
+        );
+      }
+    }
+
     const ticketRefs = new Map<string, CartTicketRef>(
       (event.tickets ?? []).map((t: any) => [
         String(t._id),
@@ -750,6 +1865,15 @@ class OrderService {
       getCachedConfigNumber(ConfigTypeEnum.gstOnComission, 18),
       this.loadHostGstContextForEvent(event),
     ]);
+    // Resolve + validate any applied coupon BEFORE pricing so the discount
+    // reduces the ticket taxable (GST/fees/commission then recompute on the
+    // discounted base — see HOIZR_FINANCE_SOURCE_OF_TRUTH.md).
+    const couponResolved = await this.resolveCouponForOrder(
+      event,
+      input.couponCode,
+      orderTickets,
+      customerId
+    );
     const pricing = this.cart.computePricingForLines(
       orderTickets.map((t) => ({
         ticketId: t.ticketTypeId,
@@ -763,9 +1887,14 @@ class OrderService {
       ticketRefs,
       applicationFeePercent,
       applicationFeeGstPercent,
-      host
+      host,
+      couponResolved?.couponDiscountPaise ?? 0
     );
     const grossAmount = pricing.grossAmount;
+    const appliedDiscount =
+      couponResolved && pricing.discountAmount > 0
+        ? this.buildCouponSnapshot(couponResolved.coupon, pricing.discountAmount)
+        : undefined;
 
     // Resolve Hoizr commission first so we can include it in the config
     // snapshot for both free and paid orders. AI-selected rate wins,
@@ -782,6 +1911,10 @@ class OrderService {
       hoizrCommissionPercent = aiCommissionPct;
     } else if (selectedPlan) {
       hoizrCommissionPercent = Number(selectedPlan.commissionRate ?? 0);
+    } else if (Number(grossAmount ?? 0) <= 0) {
+      // Free / RSVP order — nothing charged, no commission, no pricing plan
+      // needed. Paid orders with an unpriced event still error below.
+      hoizrCommissionPercent = 0;
     } else {
       throw new ErrorWithProps(
         "Event is not priced: host must select a pricing plan before tickets can be sold."
@@ -818,6 +1951,32 @@ class OrderService {
           : undefined,
     });
 
+    // IDOR guard (security review 2026-06-22): when linking to a host's offline
+    // payment link, verify it's real, belongs to THIS event, and is still
+    // awaiting payment — so a customer can't attach their order to an arbitrary,
+    // already-paid/cancelled/expired, or cross-event offline link. Runs BEFORE
+    // the free branch so ₹0 offline links are validated too (the free path also
+    // stamps offlineOrderId now).
+    if (input.offlineOrderId) {
+      if (!isAlphanumeric(input.offlineOrderId)) {
+        throw new ErrorWithProps("Invalid payment link.");
+      }
+      const offline: any = await OfflineOrderModel.findById(input.offlineOrderId)
+        .select("status linkedOrderId eventId isDeleted")
+        .lean();
+      if (
+        !offline ||
+        offline.isDeleted === true ||
+        String(offline.eventId) !== String(event._id) ||
+        offline.linkedOrderId ||
+        offline.status === "PAID" ||
+        offline.status === "CANCELLED" ||
+        offline.status === "EXPIRED"
+      ) {
+        throw new ErrorWithProps("This payment link is no longer valid.");
+      }
+    }
+
     if (pricing.totalAmount <= 0) {
       const order = await this.finalizeFreeOrder(
         customerId,
@@ -827,7 +1986,8 @@ class OrderService {
         orderExtras,
         pricing,
         reservedAt,
-        appliedConfigSnapshot
+        appliedConfigSnapshot,
+        appliedDiscount
       );
       return { order };
     }
@@ -861,6 +2021,7 @@ class OrderService {
       return { order: pending.toObject ? pending.toObject() : pending, checkout };
     }
 
+    // (offlineOrderId already validated above, before the free branch.)
     const created = await OrderModel.create({
       customerId,
       guestInfo: input.guestInfo,
@@ -869,6 +2030,8 @@ class OrderService {
       tickets: orderTickets,
       extras: orderExtras,
       subtotal: grossAmount,
+      discountAmount: pricing.discountAmount,
+      appliedDiscount,
       platformFee: pricing.applicationFee,
       platformFeeGst: pricing.platformFeeGst,
       totalAmount: pricing.totalAmount,
@@ -888,6 +2051,12 @@ class OrderService {
       pageQuery: input.pageQuery,
       promoterId: input.promoterId,
       referralCode: input.referralCode,
+      // Link to a host's offline payment link when the customer paid via /t/<code>
+      // (now an authed flow — guest checkout removed). The post-purchase worker
+      // reads Order.offlineOrderId to flip the OfflineOrder to PAID.
+      ...(input.offlineOrderId
+        ? { offlineOrderId: input.offlineOrderId, source: "OFFLINE_LINK" }
+        : {}),
     });
 
     const checkout = await this.ensureRazorpayOrder(
@@ -925,6 +2094,123 @@ class OrderService {
       customerId,
       isDeleted: false,
     }).lean<Order>();
+  }
+
+  /**
+   * Mint a fresh signed Cloudinary URL for the customer-platform-fee
+   * invoice tied to this order. The PDF itself is produced server-side
+   * by the paid-order-fanout worker — if that hasn't run yet (race with
+   * webhook delivery) or the invoice job failed, this resolves to null
+   * and the UI tells the customer to retry shortly or check their email.
+   *
+   * Authorisation: the order must belong to the calling customer.
+   * Without this check a leaked orderId would expose another customer's
+   * invoice PII + GSTIN.
+   */
+  async getMyOrderInvoice(
+    customerId: string,
+    orderId: string
+  ): Promise<{
+    invoiceNumber: string;
+    pdfUrl: string;
+    expiresAt: Date;
+    dateOfIssue?: Date;
+  } | null> {
+    if (!isAlphanumeric(orderId)) {
+      throw new ErrorWithProps("Invalid order id");
+    }
+
+    const order = await OrderModel.findOne({
+      _id: orderId,
+      customerId,
+      isDeleted: false,
+    })
+      .select("_id customerId")
+      .lean<{ _id: any; customerId: string }>();
+    if (!order) throw new ErrorWithProps("Order not found");
+
+    const invoice = await InvoiceModel.findOne({
+      relatedOrderId: orderId,
+      type: InvoiceType.CUSTOMER_PLATFORM_FEE_INVOICE,
+      isVoided: { $ne: true },
+    })
+      .select("invoiceNumber pdfStoragePublicId dateOfIssue")
+      .lean<{
+        invoiceNumber: string;
+        pdfStoragePublicId?: string;
+        dateOfIssue?: Date;
+      }>();
+    if (!invoice || !invoice.pdfStoragePublicId) return null;
+
+    const { signedUrl, expiresAt } = generateSignedPdfUrl(
+      invoice.pdfStoragePublicId
+    );
+    return {
+      invoiceNumber: invoice.invoiceNumber,
+      pdfUrl: signedUrl,
+      expiresAt,
+      dateOfIssue: invoice.dateOfIssue,
+    };
+  }
+
+  /**
+   * On-demand "get-or-generate" invoice. Recovers orders whose invoice was
+   * missed by the best-effort post-payment fanout (the only other generation
+   * trigger), which logs-and-swallows failures with no retry.
+   *  - Invoice already on file → return it now (READY) with a fresh signed URL.
+   *  - Order has no booking fee → NO_INVOICE_FREE_ORDER (the generator returns
+   *    null for these, so enqueuing would make the client poll forever).
+   *  - Otherwise → enqueue the EXISTING idempotent worker generator with a
+   *    deterministic jobId (`invoice:<orderId>`) so concurrent triggers (this
+   *    mutation racing the fanout) dedupe to a single PDF + invoice number, and
+   *    report GENERATING (client polls getMyOrderInvoice).
+   */
+  async generateMyOrderInvoice(
+    customerId: string,
+    orderId: string
+  ): Promise<{
+    status: string;
+    invoice: {
+      invoiceNumber: string;
+      pdfUrl: string;
+      expiresAt: Date;
+      dateOfIssue?: Date;
+    } | null;
+  }> {
+    if (!isAlphanumeric(orderId)) {
+      throw new ErrorWithProps("Invalid order id");
+    }
+
+    const order = await OrderModel.findOne({
+      _id: orderId,
+      customerId,
+      isDeleted: false,
+    })
+      .select("_id platformFee")
+      .lean<{ _id: any; platformFee?: number }>();
+    if (!order) throw new ErrorWithProps("Order not found");
+
+    // Already issued (and not voided) → hand back a freshly-signed link.
+    const existing = await this.getMyOrderInvoice(customerId, orderId);
+    if (existing) return { status: "READY", invoice: existing };
+
+    // A free / zero-booking-fee order has no tax invoice to issue — only the
+    // booking fee + its GST is invoiced. Matches the worker generator's own
+    // null short-circuit, so don't enqueue (it would never resolve).
+    if (Number(order.platformFee ?? 0) <= 0) {
+      return { status: "NO_INVOICE_FREE_ORDER", invoice: null };
+    }
+
+    await postPurchaseQueue.add(
+      "GENERATE_CUSTOMER_INVOICE",
+      { orderId: order._id.toString() },
+      {
+        jobId: `invoice:${order._id.toString()}`,
+        attempts: 3,
+        backoff: { type: "exponential", delay: 3000 },
+      }
+    );
+    return { status: "GENERATING", invoice: null };
   }
 
   async requestOrderRefund(
@@ -1022,9 +2308,20 @@ class OrderService {
   }
 
   /**
-   * Verify the Razorpay client-side payment handshake. The webhook is the
-   * source of truth, but this mutation gives the client a fast happy-path
-   * to render the success screen without waiting for webhook latency.
+   * Verify the Razorpay client-side payment handshake AND finalize the
+   * order in the same request. The Razorpay webhook is the safety net —
+   * if the customer's browser closes mid-callback or the network drops,
+   * the webhook still finalises the order minutes later. Verification
+   * here is the same set the webhook applies (signature + fetchPayment
+   * + amount + authorised/captured status), so promoting it to a
+   * finaliser does not weaken the trust model.
+   *
+   * Idempotency: a single MongoDB transaction guards the status flip,
+   * QR-payload generation, and per-variant inventory $inc using
+   * `qrCodeData` as the sentinel — if the webhook (or a second
+   * fast-path call) lands second, it sees the QR is already set and
+   * exits without double-decrementing inventory or re-posting the
+   * ledger.
    */
   async confirmPayment(
     customerId: string,
@@ -1032,51 +2329,199 @@ class OrderService {
     razorpayPaymentId: string,
     razorpaySignature: string
   ): Promise<Order> {
-    const order = await OrderModel.findOne({
+    const existing = await OrderModel.findOne({
       razorpayOrderId,
       customerId,
       isDeleted: false,
     }).lean<Order & { _id: any }>();
-    if (!order) throw new ErrorWithProps("Order not found");
+    if (!existing) throw new ErrorWithProps("Order not found");
 
-    const expectedSignature = crypto
-      .createHmac("sha256", EnvVars.values.RAZORPAY_KEY_SECRET)
-      .update(`${razorpayOrderId}|${razorpayPaymentId}`)
-      .digest("hex");
-
-    // Timing-safe compare. `!==` leaks the prefix-match length via
-    // CPU cycle count; with HMAC signatures that's exploitable.
-    let signatureOk = false;
-    try {
-      const a = Buffer.from(expectedSignature, "utf8");
-      const b = Buffer.from(razorpaySignature ?? "", "utf8");
-      signatureOk = a.length === b.length && crypto.timingSafeEqual(a, b);
-    } catch {
-      signatureOk = false;
-    }
+    const razorpay = getRazorpayPayments();
+    const signatureOk = razorpay.verifyCheckoutSignature({
+      razorpayOrderId,
+      razorpayPaymentId,
+      razorpaySignature: razorpaySignature ?? "",
+    });
     if (!signatureOk) {
       throw new ErrorWithProps("Invalid payment signature");
     }
 
-    if (order.orderStatus === OrderStatus.PAYMENT_PENDING) {
-      // The webhook handler is the source of truth for status flip + QR
-      // generation under a Mongo transaction. This mutation just records
-      // the client-side handshake so a fast success screen can render
-      // before the webhook lands.
-      await OrderModel.updateOne(
-        { _id: order._id },
-        {
-          $set: {
-            razorpayPaymentId,
-            razorpaySignature,
-          },
-        }
-      );
-      (order as any).razorpayPaymentId = razorpayPaymentId;
-      (order as any).razorpaySignature = razorpaySignature;
+    let payment: Awaited<ReturnType<typeof razorpay.fetchPayment>>;
+    try {
+      payment = await razorpay.fetchPayment(razorpayPaymentId);
+    } catch {
+      throw new ErrorWithProps("Unable to verify payment with Razorpay");
     }
 
-    return order as Order;
+    if (payment?.order_id !== razorpayOrderId) {
+      throw new ErrorWithProps("Payment does not match this order");
+    }
+    const expectedAmountPaise = Math.round(
+      Number(existing.totalAmount ?? 0) * 100
+    );
+    if (Number(payment?.amount ?? 0) !== expectedAmountPaise) {
+      throw new ErrorWithProps("Payment amount does not match this order");
+    }
+    const paymentStatus = String(payment?.status ?? "").toLowerCase();
+    if (!["authorized", "captured"].includes(paymentStatus)) {
+      throw new ErrorWithProps("Payment is not authorised by Razorpay");
+    }
+
+    const razorpayFee =
+      (Number((payment as any)?.fee ?? 0) +
+        Number((payment as any)?.tax ?? 0)) /
+      100;
+
+    let finalized: any = null;
+    const session = await mongoose.startSession();
+    try {
+      await session.withTransaction(async () => {
+        const order = await OrderModel.findById(existing._id).session(session);
+        if (!order) return;
+
+        // Idempotency sentinel: qrCodeData is set only on successful
+        // finalisation (here or by the webhook). If it's already there
+        // the work has been done by the other path — return the
+        // already-finalised order.
+        if (order.qrCodeData) {
+          finalized = order.toObject();
+          return;
+        }
+
+        // Only PAYMENT_PENDING orders can transition to PAYMENT_SUCCESS
+        // via the fast-path. PAYMENT_FAILED / CANCELLED / REFUNDED /
+        // SUPERSEDED are all the webhook's domain — if the customer
+        // somehow drives the success callback against one of those,
+        // bail and let the webhook handle the late-capture/manual
+        // refund accounting.
+        if (order.orderStatus !== OrderStatus.PAYMENT_PENDING) {
+          finalized = order.toObject();
+          return;
+        }
+
+        const qrPayload = `hoizr:${order._id.toString()}:${razorpayPaymentId}`;
+        // AUDIT-023: versioned signing — see utils/qr-hash.ts.
+        const qrSigned = signQrPayload(qrPayload);
+
+        order.orderStatus = OrderStatus.PAYMENT_SUCCESS;
+        order.razorpayPaymentId = razorpayPaymentId;
+        order.razorpaySignature = razorpaySignature;
+        order.razorpayFee = razorpayFee;
+        order.qrCodeData = qrPayload;
+        order.qrCodeHash = qrSigned.hash;
+        order.qrHashVersion = qrSigned.version;
+        await order.save({ session });
+
+        // Atomic check-and-increment per ticket — prevents concurrent oversell.
+        // matchedCount===0 means the ticket doesn't exist or capacity is exceeded.
+        for (const line of order.tickets ?? []) {
+          const ticketId = String(line.ticketTypeId);
+          const r = await EventModel.updateOne(
+            {
+              _id: order.eventId,
+              "tickets._id": ticketId,
+              $expr: {
+                $let: {
+                  vars: { t: { $arrayElemAt: [{ $filter: { input: "$tickets", as: "t", cond: { $eq: ["$$t._id", ticketId] } } }, 0] } },
+                  in: { $lte: [{ $add: ["$$t.ticketSold", Number(line.quantity)] }, "$$t.ticketCapacity"] },
+                },
+              },
+            },
+            { $inc: { "tickets.$.ticketSold": Number(line.quantity) } },
+            { session }
+          );
+          if (r.matchedCount === 0) {
+            throw new ErrorWithProps(`${line.ticketName ?? "Ticket"} is no longer available`);
+          }
+        }
+        for (const line of order.extras ?? []) {
+          const extraId = String(line.extraId);
+          const r = await EventModel.updateOne(
+            {
+              _id: order.eventId,
+              "extras._id": extraId,
+              $expr: {
+                $let: {
+                  vars: { e: { $arrayElemAt: [{ $filter: { input: "$extras", as: "e", cond: { $eq: ["$$e._id", extraId] } } }, 0] } },
+                  in: { $lte: [{ $add: ["$$e.sold", Number(line.quantity)] }, "$$e.quantity"] },
+                },
+              },
+            },
+            { $inc: { "extras.$.sold": Number(line.quantity) } },
+            { session }
+          );
+          if (r.matchedCount === 0) {
+            throw new ErrorWithProps(`${line.extraName ?? "Add-on"} is no longer available`);
+          }
+        }
+
+        const now = new Date();
+        await EventModel.updateOne(
+          { _id: order.eventId, firstSaleAt: { $exists: false } },
+          { $set: { firstSaleAt: now } },
+          { session }
+        );
+        await EventModel.updateOne(
+          { _id: order.eventId },
+          { $set: { lastSaleAt: now } },
+          { session }
+        );
+
+        await this.supersedeSiblingPendingOrders(
+          order.customerId,
+          order.eventId.toString(),
+          order._id.toString(),
+          session
+        );
+
+        finalized = order.toObject();
+      });
+    } finally {
+      await session.endSession();
+    }
+
+    if (!finalized) {
+      // Transaction returned without finalising — most likely the order
+      // disappeared between the initial read and the session lookup.
+      return existing as Order;
+    }
+
+    // Best-effort cart cleanup outside the transaction — same as the
+    // webhook's releaseCartLocksBestEffort. Cart Redis state is not
+    // critical-path for the customer's ticket render, so a Redis blip
+    // here should not roll back the order finalisation.
+    try {
+      await this.cart.finalizeCartForOrder(
+        finalized.customerId,
+        finalized.eventId.toString()
+      );
+    } catch {
+      // Cart cleanup is advisory; the order is already finalised.
+    }
+
+    // Fanout the lifecycle work (ledger + ticket email + SMS + follows
+    // log) via the post-purchase worker. Deterministic jobId keeps the
+    // webhook + this fast-path from running the fanout twice.
+    if (finalized.orderStatus === OrderStatus.PAYMENT_SUCCESS) {
+      // Paid order confirmed → record the coupon redemption (idempotent).
+      await this.recordCouponRedemption(finalized);
+      await postPurchaseQueue.add(
+        "APPLY_FOLLOWS_AND_SALES_LOG",
+        { orderId: finalized._id.toString() },
+        {
+          jobId: `post_purchase:${finalized._id.toString()}`,
+          attempts: 3,
+          backoff: { type: "exponential", delay: 5000 },
+        }
+      );
+      await soldOutTriggerQueue.add(
+        "CHECK_AFTER_SALE",
+        { eventId: finalized.eventId.toString() },
+        { attempts: 2 }
+      );
+    }
+
+    return finalized as Order;
   }
 }
 

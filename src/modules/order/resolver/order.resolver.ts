@@ -4,11 +4,18 @@ import Context from "../../../types/context.type";
 import {
   CreateOrderInput,
   MyOrdersFilterInput,
+  PreviewCouponInput,
 } from "../interfaces/order.input";
-import { CreateOrderResponse } from "../interfaces/order.objects";
+import {
+  CouponPreviewView,
+  CreateOrderResponse,
+  CustomerOrderInvoice,
+  GenerateInvoiceResult,
+  OfflinePaymentLinkView,
+  PublicCoupon,
+} from "../interfaces/order.objects";
 import { CustomerOrderView, toCustomerOrderView } from "../interfaces/order.view";
 import OrderService from "../service/order.service";
-
 @Resolver()
 export class OrderResolver {
   private readonly service = new OrderService();
@@ -25,6 +32,46 @@ export class OrderResolver {
       checkout: result.checkout,
     };
   }
+
+  /**
+   * Guest checkout — PUBLIC (no customer auth). The buyer submits selected
+   * tickets + contact details from the "Continue to checkout" modal. We
+   * resolve/create the customer by phone and run the normal order flow.
+   * (Rate-limit at the gateway/middleware level; value is gated by Razorpay.)
+   */
+  /** Resolve a host's offline payment link → prefill for the checkout page. */
+  @Query(() => OfflinePaymentLinkView)
+  async offlinePaymentLink(
+    @Arg("shortCode") shortCode: string
+  ): Promise<OfflinePaymentLinkView> {
+    return this.service.resolveOfflinePaymentLink(shortCode) as any;
+  }
+
+  /**
+   * Validate a promo code at checkout — PUBLIC so guests can preview too.
+   * Per-customer limits (maxUsagePerCustomer, FirstSignedOrder) only apply
+   * when the buyer is logged in; ctx.customerId is read opportunistically.
+   */
+  @Query(() => CouponPreviewView)
+  async previewCoupon(
+    @Ctx() ctx: Context,
+    @Arg("input") input: PreviewCouponInput
+  ): Promise<CouponPreviewView> {
+    return this.service.previewCoupon(input, ctx.customerId);
+  }
+
+  /** Public, copyable promo codes a host chose to show on an event page. */
+  @Query(() => [PublicCoupon])
+  async visibleCouponsForEvent(
+    @Arg("eventId") eventId: string
+  ): Promise<PublicCoupon[]> {
+    return this.service.visibleCouponsForEvent(eventId) as any;
+  }
+
+  // Guest checkout REMOVED (2026-06-22, user directive): there is no guest
+  // order — a customer must be logged in to place ANY order. Offline payment
+  // links now require login and pay via the authed createOrder (which accepts
+  // offlineOrderId). The old createGuestOrder mutation + service are gone.
 
   /**
    * AUDIT-030: lets the checkout client resume a PaymentPending order
@@ -104,5 +151,33 @@ export class OrderResolver {
       orderId
     );
     return order ? toCustomerOrderView(order) : null;
+  }
+
+  @Query(() => CustomerOrderInvoice, { nullable: true })
+  @UseMiddleware(isCustomerAuthenticated)
+  async getMyOrderInvoice(
+    @Ctx() ctx: Context,
+    @Arg("orderId") orderId: string
+  ): Promise<CustomerOrderInvoice | null> {
+    return this.service.getMyOrderInvoice(ctx.customerId as string, orderId);
+  }
+
+  /**
+   * On-demand invoice: if the invoice already exists, return it (READY); if the
+   * order has no booking fee, report NO_INVOICE_FREE_ORDER; otherwise enqueue
+   * the idempotent worker generator and report GENERATING (the client then
+   * polls getMyOrderInvoice). Recovers orders whose invoice was missed by the
+   * best-effort post-payment fanout.
+   */
+  @Mutation(() => GenerateInvoiceResult)
+  @UseMiddleware(isCustomerAuthenticated)
+  async generateMyOrderInvoice(
+    @Ctx() ctx: Context,
+    @Arg("orderId") orderId: string
+  ): Promise<GenerateInvoiceResult> {
+    return this.service.generateMyOrderInvoice(
+      ctx.customerId as string,
+      orderId
+    );
   }
 }

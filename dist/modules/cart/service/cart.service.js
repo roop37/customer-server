@@ -27,7 +27,7 @@ class CartService {
         const cutoff = new Date(Date.now() - redis_1.RedisKeys.LOCK_TTL_SECONDS * 1000);
         const pending = await order_schema_1.OrderModel.find({
             eventId,
-            orderStatus: "PaymentPending",
+            orderStatus: shared_1.OrderStatus.PAYMENT_PENDING,
             reservedAt: { $gte: cutoff },
         })
             .select("tickets extras")
@@ -59,7 +59,7 @@ class CartService {
         if (!ticketIds.length && !extraIds.length)
             return;
         const latest = await event_schema_1.EventModel.findById(eventId)
-            .select("tickets extras")
+            .select("tickets extras maxCapacity")
             .lean();
         if (!latest) {
             throw new mercurius_1.ErrorWithProps("Event not available for booking");
@@ -88,6 +88,23 @@ class CartService {
             const reserved = Math.max(currentLocks[(0, redis_1.extraLockKey)(eventId, extraId)] ?? 0, pendingExtras.get(extraId) ?? 0);
             if (Number(extra.sold ?? 0) + reserved > Number(extra.quantity ?? 0)) {
                 throw new mercurius_1.ErrorWithProps(`${extra.name ?? "Add-on"} is no longer available in this quantity`);
+            }
+        }
+        // Venue-wide capacity guard. Per-ticket caps can sum higher than the
+        // venue allows (e.g. 100 GA + 50 VIP at a 120-cap venue). After the
+        // per-ticket reservation above succeeds, verify the event-wide demand
+        // (sold + active locks across every ticket variant) does not exceed
+        // event.maxCapacity. Uses post-reservation locks so this customer's
+        // contribution is already included.
+        const maxCapacity = Number(latest.maxCapacity ?? 0);
+        if (maxCapacity > 0) {
+            const allTickets = (latest.tickets ?? []);
+            const allKeys = allTickets.map((t) => (0, redis_1.ticketLockKey)(eventId, String(t._id)));
+            const eventLocks = await this.loadActiveLockedQuantities(allKeys);
+            const totalSold = allTickets.reduce((sum, t) => sum + Number(t.ticketSold ?? 0), 0);
+            const totalLocked = allTickets.reduce((sum, t) => sum + (eventLocks[(0, redis_1.ticketLockKey)(eventId, String(t._id))] ?? 0), 0);
+            if (totalSold + totalLocked > maxCapacity) {
+                throw new mercurius_1.ErrorWithProps(`This event has reached its venue capacity of ${maxCapacity}.`);
             }
         }
     }
@@ -146,6 +163,13 @@ class CartService {
             if (ticket.ticketExpiryDateTime &&
                 new Date(ticket.ticketExpiryDateTime) < now) {
                 throw new mercurius_1.ErrorWithProps(`${ticket.ticketName} is no longer on sale`);
+            }
+            // Multi-day: a day's tickets stop selling at that day's start time; an
+            // all-days pass (and any untagged ticket) closes at the earliest day
+            // start. Single-day events skip this entirely.
+            if ((0, shared_1.isMultiDay)(event) &&
+                (0, shared_1.daySalesClosed)(event, ticket.dayId ?? shared_1.ALL_DAYS_TICKET, now)) {
+                throw new mercurius_1.ErrorWithProps(`Sales for ${ticket.ticketName} have closed — pick another day.`);
             }
             if (ticket.maxTicketPerUser && line.quantity > ticket.maxTicketPerUser) {
                 throw new mercurius_1.ErrorWithProps(`${ticket.ticketName} allows max ${ticket.maxTicketPerUser} per user`);
@@ -435,7 +459,7 @@ class CartService {
      * (SoT §4 eligibility gate); ineligible hosts always get zero GST.
      * Customer platform fee + its GST come from configs.
      */
-    computePricingForLines(ticketLines, extraLines, ticketRefs, applicationFeePercent, applicationFeeGstPercent, host) {
+    computePricingForLines(ticketLines, extraLines, ticketRefs, applicationFeePercent, applicationFeeGstPercent, host, couponDiscountPaise = 0) {
         return (0, cart_pricing_1.computeCartPricingForLines)({
             ticketLines,
             extraLines,
@@ -443,6 +467,7 @@ class CartService {
             applicationFeePercent,
             applicationFeeGstPercent,
             host,
+            couponDiscountPaise,
         });
     }
     toCartResponse(stored, event, applicationFeePercent, applicationFeeGstPercent, host) {

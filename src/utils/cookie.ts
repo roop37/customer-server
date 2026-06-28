@@ -23,39 +23,79 @@ const REFRESH_COOKIE_MAX_AGE_SECONDS = 90 * 24 * 60 * 60;
 
 const cookieDomain = () => EnvVars.values.COOKIE_DOMAIN || undefined;
 
-const productionCookieOptions = () => ({
-  maxAge: REFRESH_COOKIE_MAX_AGE_SECONDS,
+type CustomerCookieOptions = {
+  maxAge: number;
+  httpOnly: true;
+  sameSite: "none" | "lax";
+  secure?: true;
+  domain?: string;
+  path: "/";
+};
+
+type CustomerCookieScopeOptions = Omit<CustomerCookieOptions, "maxAge">;
+
+const productionCookieScopeOptions = (
+  domain: string | undefined = cookieDomain()
+): CustomerCookieScopeOptions => ({
   httpOnly: true,
   sameSite: "none" as const,
   secure: true,
-  ...(cookieDomain() ? { domain: cookieDomain() as string } : {}),
+  ...(domain ? { domain } : {}),
   path: "/",
 });
 
-const developmentCookieOptions = () => ({
-  maxAge: REFRESH_COOKIE_MAX_AGE_SECONDS,
+const developmentCookieScopeOptions = (): CustomerCookieScopeOptions => ({
   httpOnly: true,
   sameSite: "lax" as const,
   path: "/",
 });
+
+const buildCustomerCookieScopeOptions = (
+  domain: string | undefined = cookieDomain(),
+  production: boolean = isProduction
+) => {
+  if (production || domain) {
+    return productionCookieScopeOptions(domain);
+  }
+
+  return developmentCookieScopeOptions();
+};
+
+export const buildCustomerCookieOptions = (
+  domain: string | undefined = cookieDomain(),
+  production: boolean = isProduction
+): CustomerCookieOptions => ({
+  maxAge: REFRESH_COOKIE_MAX_AGE_SECONDS,
+  ...buildCustomerCookieScopeOptions(domain, production),
+});
+
+// Options that match a host-only cookie (no Domain attribute). Used to
+// evict cookies left over from pre-COOKIE_DOMAIN deploys, which got scoped
+// to the bare host (dev-customer.hoizr.com etc.) and now sit alongside the
+// new .hoizr.com-scoped cookies, confusing the Cookie header parser.
+const buildHostOnlyScopeOptions = (): CustomerCookieScopeOptions =>
+  isProduction
+    ? { httpOnly: true, sameSite: "none" as const, secure: true, path: "/" }
+    : { httpOnly: true, sameSite: "lax" as const, path: "/" };
 
 export const setCustomerCookie = (
   cookieKey: string,
   cookieValue: string,
   rep: FastifyReply
 ) => {
-  rep.setCookie(
-    cookieKey,
-    cookieValue,
-    isProduction ? productionCookieOptions() : developmentCookieOptions()
-  );
+  const domain = cookieDomain();
+  if (domain) {
+    rep.clearCookie(cookieKey, buildHostOnlyScopeOptions());
+  }
+  rep.setCookie(cookieKey, cookieValue, buildCustomerCookieOptions(domain));
 };
 
 export const clearCustomerCookie = (cookieKey: string, rep: FastifyReply) => {
-  rep.clearCookie(
-    cookieKey,
-    isProduction ? productionCookieOptions() : developmentCookieOptions()
-  );
+  const domain = cookieDomain();
+  rep.clearCookie(cookieKey, buildCustomerCookieScopeOptions(domain));
+  if (domain) {
+    rep.clearCookie(cookieKey, buildHostOnlyScopeOptions());
+  }
 };
 
 export const readTokenFromRequest = (

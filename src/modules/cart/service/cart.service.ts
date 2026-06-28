@@ -1,6 +1,10 @@
 import {
+  ALL_DAYS_TICKET,
   ConfigTypeEnum,
+  daySalesClosed,
   EventStatus,
+  isMultiDay,
+  OrderStatus,
   VerificationStatus,
 } from "@hoizr-technology/shared";
 import { getCachedConfigNumber } from "../../../utils/configs-cache";
@@ -72,7 +76,7 @@ class CartService {
     const cutoff = new Date(Date.now() - RedisKeys.LOCK_TTL_SECONDS * 1000);
     const pending = await OrderModel.find({
       eventId,
-      orderStatus: "PaymentPending",
+      orderStatus: OrderStatus.PAYMENT_PENDING,
       reservedAt: { $gte: cutoff },
     })
       .select("tickets extras")
@@ -128,7 +132,7 @@ class CartService {
     if (!ticketIds.length && !extraIds.length) return;
 
     const latest = await EventModel.findById(eventId)
-      .select("tickets extras")
+      .select("tickets extras maxCapacity")
       .lean();
     if (!latest) {
       throw new ErrorWithProps("Event not available for booking");
@@ -176,6 +180,33 @@ class CartService {
       if (Number(extra.sold ?? 0) + reserved > Number(extra.quantity ?? 0)) {
         throw new ErrorWithProps(
           `${extra.name ?? "Add-on"} is no longer available in this quantity`
+        );
+      }
+    }
+
+    // Venue-wide capacity guard. Per-ticket caps can sum higher than the
+    // venue allows (e.g. 100 GA + 50 VIP at a 120-cap venue). After the
+    // per-ticket reservation above succeeds, verify the event-wide demand
+    // (sold + active locks across every ticket variant) does not exceed
+    // event.maxCapacity. Uses post-reservation locks so this customer's
+    // contribution is already included.
+    const maxCapacity = Number((latest as any).maxCapacity ?? 0);
+    if (maxCapacity > 0) {
+      const allTickets = (latest.tickets ?? []) as any[];
+      const allKeys = allTickets.map((t) => ticketLockKey(eventId, String(t._id)));
+      const eventLocks = await this.loadActiveLockedQuantities(allKeys);
+      const totalSold = allTickets.reduce(
+        (sum, t) => sum + Number(t.ticketSold ?? 0),
+        0
+      );
+      const totalLocked = allTickets.reduce(
+        (sum, t) =>
+          sum + (eventLocks[ticketLockKey(eventId, String(t._id))] ?? 0),
+        0
+      );
+      if (totalSold + totalLocked > maxCapacity) {
+        throw new ErrorWithProps(
+          `This event has reached its venue capacity of ${maxCapacity}.`
         );
       }
     }
@@ -252,6 +283,17 @@ class CartService {
       ) {
         throw new ErrorWithProps(
           `${ticket.ticketName} is no longer on sale`
+        );
+      }
+      // Multi-day: a day's tickets stop selling at that day's start time; an
+      // all-days pass (and any untagged ticket) closes at the earliest day
+      // start. Single-day events skip this entirely.
+      if (
+        isMultiDay(event as any) &&
+        daySalesClosed(event as any, ticket.dayId ?? ALL_DAYS_TICKET, now)
+      ) {
+        throw new ErrorWithProps(
+          `Sales for ${ticket.ticketName} have closed — pick another day.`
         );
       }
       if (ticket.maxTicketPerUser && line.quantity > ticket.maxTicketPerUser) {
@@ -638,7 +680,8 @@ class CartService {
     ticketRefs: Map<string, CartTicketRef>,
     applicationFeePercent: number,
     applicationFeeGstPercent: number,
-    host: CartHostGstContext | null
+    host: CartHostGstContext | null,
+    couponDiscountPaise = 0
   ): CartPricing {
     return computeCartPricingForLines({
       ticketLines,
@@ -647,6 +690,7 @@ class CartService {
       applicationFeePercent,
       applicationFeeGstPercent,
       host,
+      couponDiscountPaise,
     });
   }
 

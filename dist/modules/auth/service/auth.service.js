@@ -18,32 +18,44 @@ class AuthService {
         this.otp = new otp_service_1.default();
     }
     async requestOtp(input) {
-        const phone = input.phone.trim();
-        if (!(0, validations_1.isValidPhone)(phone)) {
+        const normalized = (0, validations_1.normalizeCustomerPhone)(input.phone);
+        if (!normalized) {
             throw new mercurius_1.ErrorWithProps("Invalid phone number");
         }
+        const { raw, e164 } = normalized;
         // Rate limit OTP requests per phone — prevents abuse of the
-        // DoubleTick/SMS budget and blocks brute-force enumeration of
-        // existing customers via the requestOtp response.
-        const rlKey = `customer_otp_request:${phone}`;
+        // DoubleTick/SMS budget and slows repeated account-status probes.
+        // Key by E.164 so "9876543210" and "+919876543210" hit the same bucket.
+        const rlKey = `customer_otp_request:${e164}`;
         if (!(await (0, rateLimit_1.checkRateLimit)(rlKey))) {
             throw new mercurius_1.ErrorWithProps("Too many OTP requests for this number. Try again later.");
         }
         await (0, rateLimit_1.incrementRateLimit)(rlKey);
-        const existing = await customer_schema_1.CustomerModel.findOne({ phone }).select("_id").lean();
-        return this.otp.generateOtp(phone, Boolean(existing));
+        // Dual-lookup: match by either E.164 (post-backfill records) OR raw
+        // input (pre-backfill records whose `phone` is still in legacy form).
+        // Backfill script in internal-utility-scripts/ migrates everyone to
+        // E.164 — once done, this can collapse to `phoneE164: e164`.
+        const existing = await customer_schema_1.CustomerModel.findOne({
+            $or: [{ phoneE164: e164 }, { phone: e164 }, { phone: raw }],
+            isDeleted: false,
+        })
+            .select("_id")
+            .lean();
+        const otpId = await this.otp.generateOtp(e164, Boolean(existing));
+        return { otpId, profileRequired: !existing };
     }
     async verifyOtp(input) {
-        const phone = input.phone.trim();
-        if (!(0, validations_1.isValidPhone)(phone)) {
+        const normalized = (0, validations_1.normalizeCustomerPhone)(input.phone);
+        if (!normalized) {
             throw new mercurius_1.ErrorWithProps("Invalid phone number");
         }
+        const { raw, e164 } = normalized;
         // Rate limit verification attempts per phone — prevents OTP brute-force.
-        const verifyRlKey = `customer_otp_verify:${phone}`;
+        const verifyRlKey = `customer_otp_verify:${e164}`;
         if (!(await (0, rateLimit_1.checkRateLimit)(verifyRlKey))) {
             throw new mercurius_1.ErrorWithProps("Too many failed verification attempts. Try again later.");
         }
-        const result = await this.otp.validateOtp(phone, input.otpId, input.otp);
+        const result = await this.otp.validateOtp(e164, input.otpId, input.otp);
         if (!result.status) {
             // Only count failed verifications toward the lockout — successful
             // ones reset the counter so a legitimate user isn't penalised.
@@ -51,7 +63,11 @@ class AuthService {
             throw new mercurius_1.ErrorWithProps(result.message || "Invalid OTP");
         }
         await (0, rateLimit_1.resetRateLimit)(verifyRlKey);
-        let customer = await customer_schema_1.CustomerModel.findOne({ phone, isDeleted: false });
+        // Dual-lookup: same shape as requestOtp — covers pre- and post-backfill records.
+        let customer = await customer_schema_1.CustomerModel.findOne({
+            $or: [{ phoneE164: e164 }, { phone: e164 }, { phone: raw }],
+            isDeleted: false,
+        });
         let isNewCustomer = false;
         if (!customer) {
             const firstName = input.firstName?.trim();
@@ -72,8 +88,12 @@ class AuthService {
             if (emailTaken) {
                 throw new mercurius_1.ErrorWithProps("That email is already in use on another Hoizr account. Use a different email or sign in with Google.", { code: auth_errors_1.CustomerAuthErrorCodes.EMAIL_USED_ELSEWHERE });
             }
+            // New signups always store the E.164 form in both fields. `phone` is
+            // kept in sync with `phoneE164` for the legacy callers (e.g. invoice
+            // PDFs, ticket emails) that still read `phone` directly.
             customer = await customer_schema_1.CustomerModel.create({
-                phone,
+                phone: e164,
+                phoneE164: e164,
                 firstName,
                 lastName,
                 email,
@@ -81,6 +101,13 @@ class AuthService {
                 authTokenVersion: 0,
             });
             isNewCustomer = true;
+        }
+        else if (!customer.phoneE164) {
+            // Existing record from pre-D16 — opportunistically backfill phoneE164
+            // when the customer next logs in. The standalone backfill script
+            // covers customers who never log in again.
+            customer.phoneE164 = e164;
+            await customer.save();
         }
         // Welcome email only on customer creation, fire-and-forget via queue.
         if (isNewCustomer && customer.email) {

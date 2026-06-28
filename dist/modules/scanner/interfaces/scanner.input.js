@@ -9,7 +9,7 @@ var __metadata = (this && this.__metadata) || function (k, v) {
     if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.ScanTicketInput = exports.ScannerLoginInput = void 0;
+exports.OfflineScanInput = exports.ScanTicketInput = exports.ScannerLoginInput = void 0;
 const type_graphql_1 = require("type-graphql");
 let ScannerLoginInput = class ScannerLoginInput {
 };
@@ -35,3 +35,18 @@ __decorate([
 exports.ScanTicketInput = ScanTicketInput = __decorate([
     (0, type_graphql_1.InputType)()
 ], ScanTicketInput);
+// AUDIT-016: one queued offline scan being synced back to the server.
+let OfflineScanInput = class OfflineScanInput {
+};
+exports.OfflineScanInput = OfflineScanInput;
+__decorate([
+    (0, type_graphql_1.Field)(() => String),
+    __metadata("design:type", String)
+], OfflineScanInput.prototype, "qrCodeData", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => Date),
+    __metadata("design:type", Date)
+], OfflineScanInput.prototype, "scannedAt", void 0);
+exports.OfflineScanInput = OfflineScanInput = __decorate([
+    (0, type_graphql_1.InputType)()
+], OfflineScanInput);

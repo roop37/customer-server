@@ -43,6 +43,20 @@ let ScannerResolver = class ScannerResolver {
     async scanTicket(input, ctx) {
         return this.service.scanTicket(input, ctx);
     }
+    /**
+     * AUDIT-016: download every valid ticket for the scanner's event so the
+     * app can validate + admit guests fully offline.
+     */
+    async scannerEventManifest(ctx) {
+        return this.service.getEventManifest(ctx);
+    }
+    /**
+     * AUDIT-016: replay queued offline check-ins once the network is back.
+     * Returns a per-item result so the client can reconcile conflicts.
+     */
+    async syncOfflineScans(scans, ctx) {
+        return this.service.syncOfflineScans(scans, ctx);
+    }
 };
 exports.ScannerResolver = ScannerResolver;
 __decorate([
@@ -76,6 +90,23 @@ __decorate([
     __metadata("design:paramtypes", [scanner_input_1.ScanTicketInput, Object]),
     __metadata("design:returntype", Promise)
 ], ScannerResolver.prototype, "scanTicket", null);
+__decorate([
+    (0, type_graphql_1.Query)(() => scanner_objects_1.ScannerManifest),
+    (0, type_graphql_1.UseMiddleware)(scanner_auth_1.isScannerAuthenticated),
+    __param(0, (0, type_graphql_1.Ctx)()),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [Object]),
+    __metadata("design:returntype", Promise)
+], ScannerResolver.prototype, "scannerEventManifest", null);
+__decorate([
+    (0, type_graphql_1.Mutation)(() => [scanner_objects_1.OfflineScanResult]),
+    (0, type_graphql_1.UseMiddleware)(scanner_auth_1.isScannerAuthenticated),
+    __param(0, (0, type_graphql_1.Arg)("scans", () => [scanner_input_1.OfflineScanInput])),
+    __param(1, (0, type_graphql_1.Ctx)()),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [Array, Object]),
+    __metadata("design:returntype", Promise)
+], ScannerResolver.prototype, "syncOfflineScans", null);
 exports.ScannerResolver = ScannerResolver = __decorate([
     (0, type_graphql_1.Resolver)()
 ], ScannerResolver);

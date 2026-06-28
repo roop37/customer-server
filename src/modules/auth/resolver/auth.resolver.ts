@@ -39,8 +39,7 @@ export class AuthResolver {
   async customerRequestOtp(
     @Arg("input") input: CustomerOtpRequestInput
   ): Promise<CustomerOtpResponse> {
-    const otpId = await this.service.requestOtp(input);
-    return { otpId };
+    return this.service.requestOtp(input);
   }
 
   @Mutation(() => CustomerAuthResponse)
@@ -92,6 +91,9 @@ export class AuthResolver {
         result.refreshToken,
         ctx.rep
       );
+      if (result.uniqueId) {
+        setCustomerCookie(CustomerCookieKeys.UNIQUE_ID, result.uniqueId, ctx.rep);
+      }
     }
 
     return result;
@@ -133,6 +135,7 @@ export class AuthResolver {
       result.refreshToken,
       ctx.rep
     );
+    setCustomerCookie(CustomerCookieKeys.UNIQUE_ID, result.uniqueId, ctx.rep);
 
     return result;
   }

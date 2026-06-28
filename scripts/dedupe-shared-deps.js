@@ -41,7 +41,40 @@ if (!sharedDependencyRoot || !fs.existsSync(packageNm)) {
   process.exit(0);
 }
 
+if (path.resolve(sharedDependencyRoot) === path.resolve(packageNm)) {
+  console.warn(
+    `[dedupe-shared-deps] skipping — shared package uses ${packageName}/node_modules`
+  );
+  process.exit(0);
+}
+
 let changed = 0;
+const lstatOrNull = (targetPath) => {
+  try {
+    return fs.lstatSync(targetPath);
+  } catch {
+    return null;
+  }
+};
+
+const realpathOrNull = (targetPath) => {
+  try {
+    return fs.realpathSync(targetPath);
+  } catch {
+    return null;
+  }
+};
+
+const removeExisting = (targetPath) => {
+  const stat = lstatOrNull(targetPath);
+  if (!stat) return;
+  if (stat.isSymbolicLink()) {
+    fs.unlinkSync(targetPath);
+    return;
+  }
+  fs.rmSync(targetPath, { recursive: true, force: true });
+};
+
 for (const { rel } of targets) {
   const sharedPath = path.join(sharedDependencyRoot, rel);
   const packagePath = path.join(packageNm, rel);
@@ -51,17 +84,13 @@ for (const { rel } of targets) {
   }
 
   let isLinkToPackage = false;
-  try {
-    const stat = fs.lstatSync(sharedPath);
-    if (stat.isSymbolicLink()) {
-      isLinkToPackage = fs.realpathSync(sharedPath) === fs.realpathSync(packagePath);
-    }
-  } catch {
-    // Path does not exist yet.
+  const stat = lstatOrNull(sharedPath);
+  if (stat?.isSymbolicLink()) {
+    isLinkToPackage = realpathOrNull(sharedPath) === realpathOrNull(packagePath);
   }
   if (isLinkToPackage) continue;
 
-  fs.rmSync(sharedPath, { recursive: true, force: true });
+  removeExisting(sharedPath);
   fs.mkdirSync(path.dirname(sharedPath), { recursive: true });
   fs.symlinkSync(packagePath, sharedPath, "dir");
   changed += 1;

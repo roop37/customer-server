@@ -4,11 +4,9 @@ import {
   ArtistMerchOrderStatus,
 } from "@hoizr-technology/shared";
 import { getModelForClass, mongoose } from "@typegoose/typegoose";
-import crypto from "crypto";
 import { ErrorWithProps } from "mercurius";
 import Context from "../../../types/context.type";
-import { EnvVars } from "../../../utils/environment";
-import { getRazorpay } from "../../../utils/razorpay.client";
+import { getRazorpayPayments } from "../../../utils/razorpay.client";
 import { isAlphanumeric } from "../../../utils/validations";
 import { ArtistMerchCheckoutPayload } from "../interfaces/artist-merch-order.objects";
 import {
@@ -114,10 +112,10 @@ class ArtistMerchOrderService {
       status: ArtistMerchOrderStatus.PAYMENT_PENDING,
     });
 
-    const razorpay = getRazorpay();
-    const rzpOrder = await razorpay.orders.create({
-      amount: Math.round(totalAmount * 100),
-      currency: merch.currency,
+    const razorpay = getRazorpayPayments();
+    const rzpOrder = await razorpay.createOrder({
+      amountPaise: Math.round(totalAmount * 100),
+      currency: "INR",
       receipt: order._id.toString(),
       notes: {
         kind: "merch",
@@ -135,7 +133,7 @@ class ArtistMerchOrderService {
       order: order.toObject() as ArtistMerchOrder,
       checkout: {
         razorpayOrderId: rzpOrder.id,
-        razorpayKeyId: EnvVars.values.RAZORPAY_KEY_ID,
+        razorpayKeyId: razorpay.keyId,
         amount: totalAmount,
         currency: merch.currency,
         orderId: order._id.toString(),
@@ -156,11 +154,15 @@ class ArtistMerchOrderService {
     });
     if (!order) throw new ErrorWithProps("Merch order not found");
 
-    const expectedSignature = crypto
-      .createHmac("sha256", EnvVars.values.RAZORPAY_KEY_SECRET)
-      .update(`${input.razorpayOrderId}|${input.razorpayPaymentId}`)
-      .digest("hex");
-    if (expectedSignature !== input.razorpaySignature) {
+    // Timing-safe HMAC verify shared with the event-order path so a
+    // future Razorpay-side change lands in one place. `===` here used to
+    // leak prefix length via CPU cycle count.
+    const signatureOk = getRazorpayPayments().verifyCheckoutSignature({
+      razorpayOrderId: input.razorpayOrderId,
+      razorpayPaymentId: input.razorpayPaymentId,
+      razorpaySignature: input.razorpaySignature,
+    });
+    if (!signatureOk) {
       throw new ErrorWithProps("Invalid payment signature");
     }
 
