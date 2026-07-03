@@ -27,10 +27,6 @@ class OtpService {
         expiresAt: moment().add(5, "minute").utc().toDate(),
       });
 
-      const message = login
-        ? `Your Hoizr login code is ${otp}. Valid for 5 minutes.`
-        : `Welcome to Hoizr! Your verification code is ${otp}. Valid for 5 minutes.`;
-
       // WhatsApp is the PRIMARY OTP channel (Meta Cloud API, Hoizr's WABA);
       // in dev / without keys the worker console-logs the send. SMS is
       // retained as a parallel fallback during rollout so OTP is never
@@ -43,9 +39,11 @@ class OtpService {
         // never let a WhatsApp enqueue failure block the SMS fallback
       }
 
+      // MSG91 fills the DLT template; we pass only the variables. Job name is
+      // the template key resolved in hoizr-workers sms.process.ts.
       await smsQueue.add(login ? "CUSTOMER_LOGIN_OTP" : "CUSTOMER_REGISTER_OTP", {
         phoneNumber: phone,
-        message,
+        variables: { otp },
       });
 
       return encryptData(otpRecord._id.toString());
