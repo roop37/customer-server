@@ -5,7 +5,10 @@ import { randomInt } from "node:crypto";
 import { smsQueue } from "../../../sms/sms.queue";
 import { decryptData, encryptData } from "../../../utils/crypt";
 import { EnvVars } from "../../../utils/environment";
-import { enqueueWhatsAppOtp } from "../../../utils/primary-whatsapp.queue";
+import {
+  enqueueWhatsAppOtp,
+  isWhatsAppLive,
+} from "../../../utils/primary-whatsapp.queue";
 import { OtpModel } from "../schema/otp.schema";
 
 const OTP_LENGTH = 6;
@@ -27,24 +30,28 @@ class OtpService {
         expiresAt: moment().add(5, "minute").utc().toDate(),
       });
 
-      // WhatsApp is the PRIMARY OTP channel (Meta Cloud API, Hoizr's WABA);
-      // in dev / without keys the worker console-logs the send. SMS is
-      // retained as a parallel fallback during rollout so OTP is never
-      // undelivered while the WhatsApp auth template clears Meta review —
-      // once WhatsApp delivery is proven in prod this becomes
-      // failure-triggered only. `phone` is already canonical E.164.
-      try {
-        await enqueueWhatsAppOtp(phone, otp);
-      } catch {
-        // never let a WhatsApp enqueue failure block the SMS fallback
+      // OTP delivery: WhatsApp PRIMARY, SMS on failure (both MSG91). When
+      // WhatsApp is live we enqueue only WhatsApp — the worker fires the SMS
+      // fallback (carried in the job's meta.smsFallback) if the send fails, so
+      // we don't pay for two messages per login. When WhatsApp is NOT live
+      // (e.g. during rollout, or the phone can't be normalised), send SMS
+      // directly so OTP is never undelivered. `phone` is canonical E.164;
+      // job name = MSG91 SMS template key resolved in hoizr-workers.
+      const smsJobName = login ? "CUSTOMER_LOGIN_OTP" : "CUSTOMER_REGISTER_OTP";
+      let whatsappTaken = false;
+      if (isWhatsAppLive()) {
+        try {
+          whatsappTaken = await enqueueWhatsAppOtp(phone, otp, smsJobName);
+        } catch {
+          whatsappTaken = false;
+        }
       }
-
-      // MSG91 fills the DLT template; we pass only the variables. Job name is
-      // the template key resolved in hoizr-workers sms.process.ts.
-      await smsQueue.add(login ? "CUSTOMER_LOGIN_OTP" : "CUSTOMER_REGISTER_OTP", {
-        phoneNumber: phone,
-        variables: { otp },
-      });
+      if (!whatsappTaken) {
+        await smsQueue.add(smsJobName, {
+          phoneNumber: phone,
+          variables: { otp },
+        });
+      }
 
       return encryptData(otpRecord._id.toString());
     } catch {
