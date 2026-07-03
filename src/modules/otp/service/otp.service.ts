@@ -30,28 +30,27 @@ class OtpService {
         expiresAt: moment().add(5, "minute").utc().toDate(),
       });
 
-      // OTP delivery: WhatsApp PRIMARY, SMS on failure (both MSG91). When
-      // WhatsApp is live we enqueue only WhatsApp — the worker fires the SMS
-      // fallback (carried in the job's meta.smsFallback) if the send fails, so
-      // we don't pay for two messages per login. When WhatsApp is NOT live
-      // (e.g. during rollout, or the phone can't be normalised), send SMS
-      // directly so OTP is never undelivered. `phone` is canonical E.164;
-      // job name = MSG91 SMS template key resolved in hoizr-workers.
+      // OTP delivery over MSG91. MSG91's WhatsApp send is ASYNC — it returns
+      // "request in process" (status:success) immediately, so we can NEVER know
+      // synchronously whether WhatsApp actually reached the user (e.g. the
+      // number isn't on WhatsApp); that failure only shows up later on the
+      // delivery webhook. For a LOGIN OTP that async gap = lockout, so we send
+      // WhatsApp (when live) AND SMS in parallel — OTP is Hoizr-funded and
+      // low-volume, so the double-send cost is negligible and delivery is
+      // guaranteed. (Narrow to WhatsApp-primary only via an async webhook-driven
+      // fallback if that cost ever matters.) `phone` is canonical E.164.
       const smsJobName = login ? "CUSTOMER_LOGIN_OTP" : "CUSTOMER_REGISTER_OTP";
-      let whatsappTaken = false;
       if (isWhatsAppLive()) {
         try {
-          whatsappTaken = await enqueueWhatsAppOtp(phone, otp, smsJobName);
+          await enqueueWhatsAppOtp(phone, otp);
         } catch {
-          whatsappTaken = false;
+          // best-effort — SMS below still delivers the code
         }
       }
-      if (!whatsappTaken) {
-        await smsQueue.add(smsJobName, {
-          phoneNumber: phone,
-          variables: { otp },
-        });
-      }
+      await smsQueue.add(smsJobName, {
+        phoneNumber: phone,
+        variables: { otp },
+      });
 
       return encryptData(otpRecord._id.toString());
     } catch {

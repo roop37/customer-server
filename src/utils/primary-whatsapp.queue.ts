@@ -10,9 +10,6 @@ import { redisClient } from "./redis";
  * Job shapes mirror the worker's union:
  *  - template: marketing-legal shape; OTP uses an AUTHENTICATION template.
  *  - text: only valid inside a 24h customer-initiated window.
- *
- * `meta.smsFallback` (OTP only): the worker enqueues this SMS job if the
- * WhatsApp send FAILS, so OTP is WhatsApp-primary with SMS on failure.
  */
 type PrimaryWhatsAppJob =
   | {
@@ -56,20 +53,17 @@ const OTP_TEMPLATE = process.env.WHATSAPP_OTP_TEMPLATE_NAME ?? "hoizr_otp";
 const OTP_TEMPLATE_LANG = process.env.WHATSAPP_OTP_TEMPLATE_LANG ?? "en";
 
 /**
- * Enqueue a phone OTP over WhatsApp (primary channel). `phoneE164` is the
- * canonical `+91…` form; we format to digits-only. Returns false (without
- * throwing) if the phone can't be normalised, so the caller sends SMS instead.
- *
- * `smsJobName` (the MSG91 SMS template key, e.g. CUSTOMER_LOGIN_OTP) is carried
- * in meta.smsFallback so the worker fires SMS if the WhatsApp send fails.
+ * Enqueue a phone OTP over WhatsApp (sent in parallel with SMS by the caller —
+ * MSG91's send is async so we can't gate SMS on WhatsApp success). `phoneE164`
+ * is the canonical `+91…` form; we format to digits-only. Returns false
+ * (without throwing) if the phone can't be normalised.
  *
  * The template takes the OTP as the body parameter and (for a copy-code button)
  * the same value as the button parameter.
  */
 export const enqueueWhatsAppOtp = async (
   phoneE164: string,
-  otp: string,
-  smsJobName: string
+  otp: string
 ): Promise<boolean> => {
   const toDigits = formatForWhatsApp(phoneE164);
   if (!toDigits) return false;
@@ -88,10 +82,7 @@ export const enqueueWhatsAppOtp = async (
         parameters: [{ type: "text", text: otp }],
       },
     ],
-    meta: {
-      purpose: "otp",
-      smsFallback: { jobName: smsJobName, phoneNumber: phoneE164, variables: { otp } },
-    },
+    meta: { purpose: "otp" },
   });
   return true;
 };
