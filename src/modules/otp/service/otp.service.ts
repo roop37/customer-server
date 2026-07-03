@@ -5,7 +5,10 @@ import { randomInt } from "node:crypto";
 import { smsQueue } from "../../../sms/sms.queue";
 import { decryptData, encryptData } from "../../../utils/crypt";
 import { EnvVars } from "../../../utils/environment";
-import { enqueueWhatsAppOtp } from "../../../utils/primary-whatsapp.queue";
+import {
+  enqueueWhatsAppOtp,
+  isWhatsAppLive,
+} from "../../../utils/primary-whatsapp.queue";
 import { OtpModel } from "../schema/otp.schema";
 
 const OTP_LENGTH = 6;
@@ -27,25 +30,26 @@ class OtpService {
         expiresAt: moment().add(5, "minute").utc().toDate(),
       });
 
-      const message = login
-        ? `Your Hoizr login code is ${otp}. Valid for 5 minutes.`
-        : `Welcome to Hoizr! Your verification code is ${otp}. Valid for 5 minutes.`;
-
-      // WhatsApp is the PRIMARY OTP channel (Meta Cloud API, Hoizr's WABA);
-      // in dev / without keys the worker console-logs the send. SMS is
-      // retained as a parallel fallback during rollout so OTP is never
-      // undelivered while the WhatsApp auth template clears Meta review —
-      // once WhatsApp delivery is proven in prod this becomes
-      // failure-triggered only. `phone` is already canonical E.164.
-      try {
-        await enqueueWhatsAppOtp(phone, otp);
-      } catch {
-        // never let a WhatsApp enqueue failure block the SMS fallback
+      // OTP delivery over MSG91. MSG91's WhatsApp send is ASYNC — it returns
+      // "request in process" (status:success) immediately, so we can NEVER know
+      // synchronously whether WhatsApp actually reached the user (e.g. the
+      // number isn't on WhatsApp); that failure only shows up later on the
+      // delivery webhook. For a LOGIN OTP that async gap = lockout, so we send
+      // WhatsApp (when live) AND SMS in parallel — OTP is Hoizr-funded and
+      // low-volume, so the double-send cost is negligible and delivery is
+      // guaranteed. (Narrow to WhatsApp-primary only via an async webhook-driven
+      // fallback if that cost ever matters.) `phone` is canonical E.164.
+      const smsJobName = login ? "CUSTOMER_LOGIN_OTP" : "CUSTOMER_REGISTER_OTP";
+      if (isWhatsAppLive()) {
+        try {
+          await enqueueWhatsAppOtp(phone, otp);
+        } catch {
+          // best-effort — SMS below still delivers the code
+        }
       }
-
-      await smsQueue.add(login ? "CUSTOMER_LOGIN_OTP" : "CUSTOMER_REGISTER_OTP", {
+      await smsQueue.add(smsJobName, {
         phoneNumber: phone,
-        message,
+        variables: { otp },
       });
 
       return encryptData(otpRecord._id.toString());

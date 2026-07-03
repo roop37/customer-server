@@ -4,8 +4,8 @@ import { redisClient } from "./redis";
 
 /**
  * Producer for the common/transactional WhatsApp queue (NOT campaigns).
- * The hoizr-workers primaryWhatsAppWorker consumes these and calls the
- * Meta Cloud API — or console-logs in dev / when keys are absent.
+ * The hoizr-workers primaryWhatsAppWorker consumes these and calls MSG91
+ * WhatsApp — or console-logs in dev / when keys are absent.
  *
  * Job shapes mirror the worker's union:
  *  - template: marketing-legal shape; OTP uses an AUTHENTICATION template.
@@ -21,6 +21,17 @@ type PrimaryWhatsAppJob =
       meta?: Record<string, unknown>;
     }
   | { kind: "text"; toDigits: string; text: string; meta?: Record<string, unknown> };
+
+/**
+ * WhatsApp is "live" only with the master gate on + MSG91 creds present.
+ * Mirrors hoizr-workers msg91/whatsapp.client.ts isWhatsAppLive(). When NOT
+ * live (e.g. during rollout), OTP callers send SMS directly so OTP is never
+ * undelivered behind a dev-noop WhatsApp send.
+ */
+export const isWhatsAppLive = (): boolean =>
+  process.env.WHATSAPP_ENABLED === "true" &&
+  !!process.env.MSG91_AUTHKEY &&
+  !!process.env.MSG91_WA_INTEGRATED_NUMBER;
 
 export const primaryWhatsAppQueue = new Queue<PrimaryWhatsAppJob>(
   QueueNames.primaryWhatsappQueue,
@@ -42,13 +53,13 @@ const OTP_TEMPLATE = process.env.WHATSAPP_OTP_TEMPLATE_NAME ?? "hoizr_otp";
 const OTP_TEMPLATE_LANG = process.env.WHATSAPP_OTP_TEMPLATE_LANG ?? "en";
 
 /**
- * Enqueue a phone OTP over WhatsApp (primary channel). `phoneE164` is the
- * canonical `+91…` form; we format to digits-only for Meta. Returns false
- * (without throwing) if the phone can't be normalised, so the caller can
- * still rely on the SMS fallback.
+ * Enqueue a phone OTP over WhatsApp (sent in parallel with SMS by the caller —
+ * MSG91's send is async so we can't gate SMS on WhatsApp success). `phoneE164`
+ * is the canonical `+91…` form; we format to digits-only. Returns false
+ * (without throwing) if the phone can't be normalised.
  *
- * Meta authentication templates take the OTP as the body parameter and
- * (for a copy-code button) the same value as the button parameter.
+ * The template takes the OTP as the body parameter and (for a copy-code button)
+ * the same value as the button parameter.
  */
 export const enqueueWhatsAppOtp = async (
   phoneE164: string,
