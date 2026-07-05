@@ -50,4 +50,16 @@ export class UpdateCustomerProfileInput {
 
   @Field(() => String, { nullable: true })
   profilePic?: string;
+
+  // Plain-string social handles (settable from profile settings; also
+  // collected at waitlist-join). Instagram required only at join when a host
+  // asks for socials — here every field is optional.
+  @Field(() => String, { nullable: true })
+  instagramHandle?: string;
+
+  @Field(() => String, { nullable: true })
+  facebookHandle?: string;
+
+  @Field(() => String, { nullable: true })
+  xHandle?: string;
 }

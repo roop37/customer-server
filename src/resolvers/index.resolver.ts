@@ -14,6 +14,7 @@ import { CustomerFeedbackResolver } from "../modules/feedback/resolver/feedback.
 import { ScannerResolver } from "../modules/scanner/resolver/scanner.resolver";
 import { GuestlistResolver } from "../modules/guestlist/resolver/guestlist.resolver";
 import { CustomerLoyaltyResolver } from "../modules/loyalty/resolver/loyalty.resolver";
+import { WaitlistResolver } from "../modules/waitlist/resolver/waitlist.resolver";
 
 export const resolvers: NonEmptyArray<Function> = [
   AuthResolver,
@@ -31,4 +32,5 @@ export const resolvers: NonEmptyArray<Function> = [
   ArtistMerchOrderResolver,
   GuestlistResolver,
   CustomerLoyaltyResolver,
+  WaitlistResolver,
 ];
