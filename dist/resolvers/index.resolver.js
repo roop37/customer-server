@@ -15,6 +15,7 @@ const order_resolver_1 = require("../modules/order/resolver/order.resolver");
 const feedback_resolver_1 = require("../modules/feedback/resolver/feedback.resolver");
 const scanner_resolver_1 = require("../modules/scanner/resolver/scanner.resolver");
 const guestlist_resolver_1 = require("../modules/guestlist/resolver/guestlist.resolver");
+const loyalty_resolver_1 = require("../modules/loyalty/resolver/loyalty.resolver");
 exports.resolvers = [
     auth_resolver_1.AuthResolver,
     customer_resolver_1.CustomerResolver,
@@ -30,4 +31,5 @@ exports.resolvers = [
     artist_follow_resolver_1.ArtistFollowResolver,
     artist_merch_order_resolver_1.ArtistMerchOrderResolver,
     guestlist_resolver_1.GuestlistResolver,
+    loyalty_resolver_1.CustomerLoyaltyResolver,
 ];

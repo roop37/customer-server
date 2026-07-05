@@ -22,7 +22,6 @@ const order_input_1 = require("../interfaces/order.input");
 const order_objects_1 = require("../interfaces/order.objects");
 const order_view_1 = require("../interfaces/order.view");
 const order_service_1 = __importDefault(require("../service/order.service"));
-const cookie_1 = require("../../../utils/cookie");
 let OrderResolver = class OrderResolver {
     constructor() {
         this.service = new order_service_1.default();
@@ -56,24 +55,10 @@ let OrderResolver = class OrderResolver {
     async visibleCouponsForEvent(eventId) {
         return this.service.visibleCouponsForEvent(eventId);
     }
-    async createGuestOrder(input, ctx) {
-        const { result, accountFound, accountEmail, loggedIn, session } = await this.service.createGuestOrder(input);
-        // New-account session → set the same httpOnly auth cookies the OTP-verify
-        // path sets, so the buyer is logged in immediately. Tokens never appear in
-        // the GraphQL body — only `loggedIn` is surfaced.
-        if (session) {
-            (0, cookie_1.setCustomerCookie)(cookie_1.CustomerCookieKeys.ACCESS_TOKEN, session.accessToken, ctx.rep);
-            (0, cookie_1.setCustomerCookie)(cookie_1.CustomerCookieKeys.REFRESH_TOKEN, session.refreshToken, ctx.rep);
-            (0, cookie_1.setCustomerCookie)(cookie_1.CustomerCookieKeys.UNIQUE_ID, session.uniqueId, ctx.rep);
-        }
-        return {
-            order: (0, order_view_1.toCustomerOrderView)(result.order),
-            checkout: result.checkout,
-            accountFound,
-            accountEmail,
-            loggedIn,
-        };
-    }
+    // Guest checkout REMOVED (2026-06-22, user directive): there is no guest
+    // order — a customer must be logged in to place ANY order. Offline payment
+    // links now require login and pay via the authed createOrder (which accepts
+    // offlineOrderId). The old createGuestOrder mutation + service are gone.
     /**
      * AUDIT-030: lets the checkout client resume a PaymentPending order
      * the customer abandoned mid-Razorpay-popup, without minting a fresh
@@ -104,6 +89,16 @@ let OrderResolver = class OrderResolver {
     }
     async getMyOrderInvoice(ctx, orderId) {
         return this.service.getMyOrderInvoice(ctx.customerId, orderId);
+    }
+    /**
+     * On-demand invoice: if the invoice already exists, return it (READY); if the
+     * order has no booking fee, report NO_INVOICE_FREE_ORDER; otherwise enqueue
+     * the idempotent worker generator and report GENERATING (the client then
+     * polls getMyOrderInvoice). Recovers orders whose invoice was missed by the
+     * best-effort post-payment fanout.
+     */
+    async generateMyOrderInvoice(ctx, orderId) {
+        return this.service.generateMyOrderInvoice(ctx.customerId, orderId);
     }
 };
 exports.OrderResolver = OrderResolver;
@@ -138,14 +133,6 @@ __decorate([
     __metadata("design:paramtypes", [String]),
     __metadata("design:returntype", Promise)
 ], OrderResolver.prototype, "visibleCouponsForEvent", null);
-__decorate([
-    (0, type_graphql_1.Mutation)(() => order_objects_1.GuestCheckoutResponse),
-    __param(0, (0, type_graphql_1.Arg)("input")),
-    __param(1, (0, type_graphql_1.Ctx)()),
-    __metadata("design:type", Function),
-    __metadata("design:paramtypes", [order_input_1.GuestOrderInput, Object]),
-    __metadata("design:returntype", Promise)
-], OrderResolver.prototype, "createGuestOrder", null);
 __decorate([
     (0, type_graphql_1.Mutation)(() => order_objects_1.CreateOrderResponse),
     (0, type_graphql_1.UseMiddleware)(customer_auth_1.isCustomerAuthenticated),
@@ -203,6 +190,15 @@ __decorate([
     __metadata("design:paramtypes", [Object, String]),
     __metadata("design:returntype", Promise)
 ], OrderResolver.prototype, "getMyOrderInvoice", null);
+__decorate([
+    (0, type_graphql_1.Mutation)(() => order_objects_1.GenerateInvoiceResult),
+    (0, type_graphql_1.UseMiddleware)(customer_auth_1.isCustomerAuthenticated),
+    __param(0, (0, type_graphql_1.Ctx)()),
+    __param(1, (0, type_graphql_1.Arg)("orderId")),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [Object, String]),
+    __metadata("design:returntype", Promise)
+], OrderResolver.prototype, "generateMyOrderInvoice", null);
 exports.OrderResolver = OrderResolver = __decorate([
     (0, type_graphql_1.Resolver)()
 ], OrderResolver);

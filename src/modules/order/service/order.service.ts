@@ -1,8 +1,11 @@
 import {
+  ALL_DAYS_TICKET,
   AnalyticsEventType,
   ConfigTypeEnum,
   Coupon,
+  daySalesClosed,
   EventStatus,
+  isMultiDay,
   LifecycleSmsType,
   OrderDiscountType,
   OrderStatus,
@@ -39,11 +42,6 @@ import { resolveCustomerForOrder } from "../../customer/service/customer-resolut
 import { InvoiceModel } from "../schema/invoice.schema";
 import { generateSignedPdfUrl } from "../../../utils/cloudinary";
 import { InvoiceType } from "@hoizr-technology/shared";
-import { nanoid } from "nanoid";
-import {
-  createCustomerAuthTokens,
-  storeCustomerRefreshToken,
-} from "../../../utils/jwt";
 
 type CreateOrderServiceResult = {
   order: Order;
@@ -241,7 +239,15 @@ class OrderService {
     if (event.endDate && new Date(event.endDate) < now) {
       throw new ErrorWithProps("This event has already ended.");
     }
-    if (event.startDate && new Date(event.startDate) < now && !event.allowWalkIns) {
+    // Multi-day events keep selling later days after day 1 starts; per-day
+    // closure is enforced per ticket line via daySalesClosed in createOrder
+    // (mirrors cart.setCart). The whole-event guard is single-day only.
+    if (
+      event.startDate &&
+      new Date(event.startDate) < now &&
+      !event.allowWalkIns &&
+      !isMultiDay(event)
+    ) {
       throw new ErrorWithProps(
         "Online booking has closed because the event has already started."
       );
@@ -1052,131 +1058,9 @@ class OrderService {
     return createdOrder as Order;
   }
 
-  /**
-   * Guest checkout: a not-logged-in buyer places an order with just their
-   * contact details + selected tickets. Phone is the identity — if an
-   * account already exists we attach the order to it (and the client shows
-   * "we found your account"); otherwise we auto-create a PHONE account so the
-   * tickets live somewhere they can later log into. `guestInfo` is always
-   * stored so guest purchases are countable. Reuses the EXACT online order
-   * flow (seed cart → createOrder), so no money-path logic is duplicated.
-   */
-  /**
-   * @deprecated REMOVED from the API (2026-06-22): guest checkout no longer
-   * exists — a customer must be logged in to place ANY order. The
-   * createGuestOrder GraphQL mutation has been deleted; this method has NO
-   * caller and must not be re-exposed. Offline payment links now require login
-   * and pay through the authed createOrder (which accepts offlineOrderId).
-   */
-  async createGuestOrder(input: {
-    eventId: string;
-    tickets: { ticketId: string; quantity: number }[];
-    extras?: { extraId: string; quantity: number }[];
-    firstName: string;
-    lastName: string;
-    email: string;
-    phone: string;
-    notifyMe?: boolean;
-    offlineOrderId?: string;
-    utm?: any;
-    pageQuery?: string;
-    referralCode?: string;
-    promoterId?: string;
-    couponCode?: string;
-  }): Promise<{
-    result: CreateOrderServiceResult;
-    accountFound: boolean;
-    accountEmail?: string;
-    loggedIn: boolean;
-    session?: { accessToken: string; refreshToken: string; uniqueId: string };
-  }> {
-    if (!input.tickets?.length && !input.extras?.length) {
-      throw new ErrorWithProps("Select at least one ticket");
-    }
-    // Add-ons can't be bought on their own — require at least one ticket.
-    if (!input.tickets?.length && (input.extras?.length ?? 0) > 0) {
-      throw new ErrorWithProps(
-        "Add-ons can only be purchased together with a ticket. Add at least one ticket to continue."
-      );
-    }
-
-    const resolved = await resolveCustomerForOrder({
-      phone: input.phone,
-      email: input.email,
-      firstName: input.firstName,
-      lastName: input.lastName,
-      createIfMissing: true,
-    });
-    if (!resolved.customerId) {
-      throw new ErrorWithProps(
-        "Couldn't start checkout — please check your name, email and phone."
-      );
-    }
-
-    // NOTE: a guest purchase does exactly four things — take the contact
-    // details, create the account if the phone is new, place the order, and
-    // (for a freshly created account) log the buyer in. We deliberately do
-    // NOT silently flip marketing opt-ins here: subscribing someone to
-    // WhatsApp/email from a ticket purchase they didn't consent to is a
-    // surprise side effect. Marketing preferences are set explicitly from the
-    // profile/preferences surfaces, not as a hidden effect of checkout.
-
-    // Seed the cart for this customer, then run the normal order flow.
-    await this.cart.setCart(resolved.customerId, {
-      eventId: input.eventId,
-      tickets: input.tickets,
-      extras: input.extras ?? [],
-    });
-
-    const result = await this.createOrder(resolved.customerId, {
-      eventId: input.eventId,
-      guestInfo: {
-        firstName: input.firstName,
-        lastName: input.lastName,
-        email: input.email,
-        phone: input.phone,
-      },
-      utm: input.utm,
-      pageQuery: input.pageQuery,
-      referralCode: input.referralCode,
-      promoterId: input.promoterId,
-      couponCode: input.couponCode,
-    });
-
-    // Offline payment link → link the created order to its OfflineOrder
-    // exactly (no fuzzy matching). The OfflineOrder flips to PAID when the
-    // order finalises (post-purchase worker reads Order.offlineOrderId).
-    if (input.offlineOrderId && result.order?._id) {
-      await OrderModel.updateOne(
-        { _id: result.order._id },
-        {
-          $set: { offlineOrderId: input.offlineOrderId, source: "OFFLINE_LINK" },
-        }
-      );
-    }
-
-    // Always issue a session after guest checkout — the buyer just proved their
-    // identity by completing payment. Existing accounts skip OTP here; that's
-    // intentional (the order is already linked to their account and they've
-    // demonstrated payment-method ownership). Uses the same token utils as the
-    // OTP-verify path; the auth flow is untouched.
-    const uniqueId = nanoid();
-    const { accessToken, refreshToken } = createCustomerAuthTokens({
-      customer: resolved.customerId,
-      version: 0,
-      uniqueId,
-    });
-    await storeCustomerRefreshToken(resolved.customerId, uniqueId, refreshToken);
-    const session = { accessToken, refreshToken, uniqueId };
-
-    return {
-      result,
-      accountFound: resolved.existed,
-      accountEmail: resolved.existed ? resolved.accountEmail : undefined,
-      loggedIn: Boolean(session),
-      session,
-    };
-  }
+  // Guest checkout was REMOVED from the API (2026-06-22): a customer must be
+  // logged in to place ANY order. Offline payment links pay through the
+  // authed createOrder (which accepts offlineOrderId).
 
   /**
    * Resolve a host's offline payment-link short code → prefill payload for the
@@ -1545,12 +1429,12 @@ class OrderService {
     // CUSTOMER_ORDER_PLACED email here would double-mail the customer. Only
     // the SMS + analytics fire from this path now.
     if (recipientPhone) {
+      // Dormant: skipped until a MSG91 template is registered for this key.
       await lifecycleSmsQueue.add(LifecycleSmsType.CUSTOMER_ORDER_PLACED, {
         phoneNumber: recipientPhone,
-        message: `Your Hoizr booking is confirmed. Order #${order._id
-          .toString()
-          .slice(-6)
-          .toUpperCase()}. Check email/app for your QR.`,
+        variables: {
+          orderId: order._id.toString().slice(-6).toUpperCase(),
+        },
       });
     }
 
@@ -1673,6 +1557,17 @@ class OrderService {
       ) {
         throw new ErrorWithProps(`${ref.ticketName} is no longer on sale`);
       }
+      // Multi-day: a day's tickets stop selling at that day's start (all-days
+      // pass at the earliest day start). Re-checked here because the cart can
+      // be up to 13 min older than the order.
+      if (
+        isMultiDay(event as any) &&
+        daySalesClosed(event as any, ref.dayId ?? ALL_DAYS_TICKET, new Date())
+      ) {
+        throw new ErrorWithProps(
+          `Sales for ${ref.ticketName} have closed — pick another day.`
+        );
+      }
       if (ref.maxTicketPerUser && line.quantity > ref.maxTicketPerUser) {
         throw new ErrorWithProps(
           `${ref.ticketName} allows max ${ref.maxTicketPerUser} per user`
@@ -1726,6 +1621,21 @@ class OrderService {
       const available = Number(ref.quantity ?? 0) - Number(ref.sold ?? 0);
       if (line.quantity > available) {
         throw new ErrorWithProps(`${ref.name ?? "Add-on"} is no longer available`);
+      }
+      // HoizrExtra.linkedTicketTypes: extra scoped to specific ticket types may
+      // only be bought alongside one of those tickets (empty ⇒ any). Mirrors
+      // the cart.setCart guard — re-checked on the authoritative order path.
+      const linked = ((ref as any).linkedTicketTypes ?? []) as string[];
+      if (
+        line.quantity > 0 &&
+        linked.length > 0 &&
+        !stored.tickets.some(
+          (t) => t.quantity > 0 && linked.includes(t.ticketId)
+        )
+      ) {
+        throw new ErrorWithProps(
+          `"${ref.name ?? "This add-on"}" can only be added along with a qualifying ticket`
+        );
       }
       const unitPrice = Number(ref.price ?? 0);
       // AUDIT-003: stale extras pricing — same shape as the ticket
@@ -2162,8 +2072,13 @@ class OrderService {
       customerId,
       isDeleted: false,
     })
-      .select("_id platformFee")
-      .lean<{ _id: any; platformFee?: number }>();
+      .select("_id platformFee source razorpayPaymentId")
+      .lean<{
+        _id: any;
+        platformFee?: number;
+        source?: string;
+        razorpayPaymentId?: string;
+      }>();
     if (!order) throw new ErrorWithProps("Order not found");
 
     // Already issued (and not voided) → hand back a freshly-signed link.
@@ -2171,9 +2086,15 @@ class OrderService {
     if (existing) return { status: "READY", invoice: existing };
 
     // A free / zero-booking-fee order has no tax invoice to issue — only the
-    // booking fee + its GST is invoiced. Matches the worker generator's own
-    // null short-circuit, so don't enqueue (it would never resolve).
-    if (Number(order.platformFee ?? 0) <= 0) {
+    // booking fee + its GST is invoiced. Same for host-issued CASH orders:
+    // the booking fee was never collected by Hoizr. Both match the worker
+    // generator's null short-circuits, so don't enqueue (it would never
+    // resolve and the client would poll forever).
+    if (
+      Number(order.platformFee ?? 0) <= 0 ||
+      order.source === "OFFLINE_ISSUED" ||
+      /^(offline_|free_)/.test(String(order.razorpayPaymentId ?? ""))
+    ) {
       return { status: "NO_INVOICE_FREE_ORDER", invoice: null };
     }
 

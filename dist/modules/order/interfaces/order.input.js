@@ -104,6 +104,10 @@ __decorate([
     (0, type_graphql_1.Field)(() => String, { nullable: true }),
     __metadata("design:type", String)
 ], CreateOrderInput.prototype, "couponCode", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => String, { nullable: true }),
+    __metadata("design:type", String)
+], CreateOrderInput.prototype, "offlineOrderId", void 0);
 exports.CreateOrderInput = CreateOrderInput = __decorate([
     (0, type_graphql_1.InputType)()
 ], CreateOrderInput);
