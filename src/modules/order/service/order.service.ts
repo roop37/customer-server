@@ -13,7 +13,7 @@ import {
 import { getCachedConfigNumber } from "../../../utils/configs-cache";
 import { logger } from "../../../log/logger";
 import { getModelForClass, mongoose } from "@typegoose/typegoose";
-import { evaluateCoupon } from "./coupon-eval";
+import { evaluateCoupon, isLoyaltyCouponUsableBy } from "./coupon-eval";
 import { Queue } from "bullmq";
 import crypto from "crypto";
 import { ErrorWithProps } from "mercurius";
@@ -488,6 +488,10 @@ class OrderService {
     // a global host promo (no eventId) works for any of the host's events.
     if (coupon.eventId && String(coupon.eventId) !== String(event._id))
       throw new ErrorWithProps("That promo code isn't valid for this event");
+    // Loyalty coupons are personal — reject if this isn't the bound customer.
+    // Generic message so a leaked code doesn't reveal it's someone's reward.
+    if (!isLoyaltyCouponUsableBy(coupon, customerId))
+      throw new ErrorWithProps("That promo code isn't valid for this event");
 
     const ticketLines = orderTickets.map((t) => ({
       ticketId: t.ticketTypeId,
@@ -746,7 +750,9 @@ class OrderService {
     }).lean<any>();
     if (
       !coupon ||
-      (coupon.eventId && String(coupon.eventId) !== String(event._id))
+      (coupon.eventId && String(coupon.eventId) !== String(event._id)) ||
+      // Loyalty coupons are personal — inert for anyone but the bound customer.
+      !isLoyaltyCouponUsableBy(coupon, customerId)
     )
       return {
         ...empty,
@@ -833,6 +839,9 @@ class OrderService {
       host: String(event.hostId),
       showToCustomers: true,
       isActive: true,
+      // Never surface a personal loyalty coupon in a public listing (they are
+      // showToCustomers:false already — this is defence in depth).
+      origin: { $ne: "loyalty" },
       startDate: { $lte: now },
       endDate: { $gte: now },
       $or: [
