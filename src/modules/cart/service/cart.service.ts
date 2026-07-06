@@ -246,10 +246,15 @@ class CartService {
     if (event.endDate && new Date(event.endDate) < now) {
       throw new ErrorWithProps("This event has already ended.");
     }
+    // Multi-day events keep selling later days after day 1 starts — per-day
+    // closure is enforced by daySalesClosed below (mirrors the client's
+    // ticketSalesClosed gating). The whole-event "already started" guard only
+    // applies to single-day events.
     if (
       event.startDate &&
       new Date(event.startDate) < now &&
-      !event.allowWalkIns
+      !event.allowWalkIns &&
+      !isMultiDay(event as any)
     ) {
       throw new ErrorWithProps(
         "Online booking has closed because the event has already started."
@@ -310,6 +315,20 @@ class CartService {
         throw new ErrorWithProps("Quantity must be a whole number");
       }
       if (line.quantity < 0) throw new ErrorWithProps("Quantity cannot be negative");
+      // HoizrExtra.linkedTicketTypes: an extra scoped to specific ticket types
+      // may only be bought alongside one of those tickets (empty ⇒ any ticket).
+      const linked = ((extra as any).linkedTicketTypes ?? []) as string[];
+      if (
+        line.quantity > 0 &&
+        linked.length > 0 &&
+        !input.tickets.some(
+          (t) => t.quantity > 0 && linked.includes(t.ticketId)
+        )
+      ) {
+        throw new ErrorWithProps(
+          `"${(extra as any).name ?? "This add-on"}" can only be added along with a qualifying ticket`
+        );
+      }
     }
 
     const existing = await this.readStoredCart(customerId, input.eventId);

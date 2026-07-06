@@ -11,13 +11,13 @@ const coupon_eval_1 = require("./coupon-eval");
 const bullmq_1 = require("bullmq");
 const mercurius_1 = require("mercurius");
 const qr_hash_1 = require("../../../utils/qr-hash");
-const lifecycle_queue_1 = require("../../../utils/lifecycle.queue");
 const razorpay_client_1 = require("../../../utils/razorpay.client");
 const redis_1 = require("../../../utils/redis");
 const validations_1 = require("../../../utils/validations");
 const cart_service_1 = __importDefault(require("../../cart/service/cart.service"));
 const customer_schema_1 = require("../../customer/schema/customer.schema");
 const event_schema_1 = require("../../event/schema/event.schema");
+const guestlist_service_1 = require("../../guestlist/service/guestlist.service");
 const payout_schema_1 = require("../../payout/schema/payout.schema");
 const order_schema_1 = require("../schema/order.schema");
 const offline_order_schema_1 = require("../schema/offline-order.schema");
@@ -26,8 +26,6 @@ const customer_resolution_service_1 = require("../../customer/service/customer-r
 const invoice_schema_1 = require("../schema/invoice.schema");
 const cloudinary_1 = require("../../../utils/cloudinary");
 const shared_3 = require("@hoizr-technology/shared");
-const nanoid_1 = require("nanoid");
-const jwt_1 = require("../../../utils/jwt");
 // Same `coupons` collection main-server writes — customer-server reads it to
 // validate/redeem at checkout (Coupon class is shared).
 const CouponModel = (0, typegoose_1.getModelForClass)(shared_1.Coupon, {
@@ -177,7 +175,13 @@ class OrderService {
         if (event.endDate && new Date(event.endDate) < now) {
             throw new mercurius_1.ErrorWithProps("This event has already ended.");
         }
-        if (event.startDate && new Date(event.startDate) < now && !event.allowWalkIns) {
+        // Multi-day events keep selling later days after day 1 starts; per-day
+        // closure is enforced per ticket line via daySalesClosed in createOrder
+        // (mirrors cart.setCart). The whole-event guard is single-day only.
+        if (event.startDate &&
+            new Date(event.startDate) < now &&
+            !event.allowWalkIns &&
+            !(0, shared_1.isMultiDay)(event)) {
             throw new mercurius_1.ErrorWithProps("Online booking has closed because the event has already started.");
         }
     }
@@ -341,6 +345,10 @@ class OrderService {
         // Event-scoped coupon (coupon.eventId set) is valid only for that event;
         // a global host promo (no eventId) works for any of the host's events.
         if (coupon.eventId && String(coupon.eventId) !== String(event._id))
+            throw new mercurius_1.ErrorWithProps("That promo code isn't valid for this event");
+        // Loyalty coupons are personal — reject if this isn't the bound customer.
+        // Generic message so a leaked code doesn't reveal it's someone's reward.
+        if (!(0, coupon_eval_1.isLoyaltyCouponUsableBy)(coupon, customerId))
             throw new mercurius_1.ErrorWithProps("That promo code isn't valid for this event");
         const ticketLines = orderTickets.map((t) => ({
             ticketId: t.ticketTypeId,
@@ -529,7 +537,9 @@ class OrderService {
             code,
         }).lean();
         if (!coupon ||
-            (coupon.eventId && String(coupon.eventId) !== String(event._id)))
+            (coupon.eventId && String(coupon.eventId) !== String(event._id)) ||
+            // Loyalty coupons are personal — inert for anyone but the bound customer.
+            !(0, coupon_eval_1.isLoyaltyCouponUsableBy)(coupon, customerId))
             return {
                 ...empty,
                 ...baseFields,
@@ -596,6 +606,9 @@ class OrderService {
             host: String(event.hostId),
             showToCustomers: true,
             isActive: true,
+            // Never surface a personal loyalty coupon in a public listing (they are
+            // showToCustomers:false already — this is defence in depth).
+            origin: { $ne: "loyalty" },
             startDate: { $lte: now },
             endDate: { $gte: now },
             $or: [
@@ -628,6 +641,32 @@ class OrderService {
         }));
     }
     async finalizeFreeOrder(customerId, event, input, orderTickets, orderExtras, pricing, reservedAt, appliedConfigSnapshot, appliedDiscount) {
+        // Idempotency: a double-submitted RSVP (double-click, or a retried
+        // mutation) must not mint two confirmed orders. A free booking is keyed by
+        // the cart reservation instant — same (customer, event, reservedAt) + same
+        // lines = the same booking, so return the already-finalised order instead
+        // of creating a duplicate. (Capacity is still protected by the atomic $inc
+        // guard below, so the worst case without this is a double-booking, never an
+        // oversell. Best-effort under truly-simultaneous submits — the deletion of
+        // the cart on first finalize closes the sequential-submit window.)
+        const existingFree = await order_schema_1.OrderModel.findOne({
+            customerId,
+            eventId: event._id.toString(),
+            reservedAt,
+            orderStatus: shared_1.OrderStatus.PAYMENT_SUCCESS,
+            isDeleted: false,
+        }).sort({ createdAt: -1 });
+        if (existingFree) {
+            const sameTickets = (existingFree.tickets ?? []).length === orderTickets.length &&
+                orderTickets.every((line) => (existingFree.tickets ?? []).some((e) => e.ticketTypeId === line.ticketTypeId &&
+                    Number(e.quantity ?? 0) === Number(line.quantity)));
+            const sameExtras = (existingFree.extras ?? []).length === orderExtras.length &&
+                orderExtras.every((line) => (existingFree.extras ?? []).some((e) => e.extraId === line.extraId &&
+                    Number(e.quantity ?? 0) === Number(line.quantity)));
+            if (sameTickets && sameExtras) {
+                return existingFree.toObject();
+            }
+        }
         const session = await typegoose_1.mongoose.startSession();
         let createdOrder = null;
         try {
@@ -667,6 +706,14 @@ class OrderService {
                     pageQuery: input.pageQuery,
                     promoterId: input.promoterId,
                     referralCode: input.referralCode,
+                    // A ₹0 / RSVP offline payment link finalizes here (free path). Carry
+                    // the offline link id + source exactly like the paid path so the
+                    // post-purchase worker can flip the OfflineOrder LINK_SENT → PAID.
+                    // (The offlineOrderId is validated by the IDOR guard in createOrder,
+                    // which now runs before this free branch.)
+                    ...(input.offlineOrderId
+                        ? { offlineOrderId: input.offlineOrderId, source: "OFFLINE_LINK" }
+                        : {}),
                 });
                 const paymentId = `free_${order._id.toString()}`;
                 const qr = this.generateQrPayload(order._id.toString(), paymentId);
@@ -717,7 +764,15 @@ class OrderService {
         finally {
             await session.endSession();
         }
-        await this.cart.finalizeCartForOrder(customerId, event._id.toString());
+        // Best-effort cart cleanup outside the transaction — a Redis blip here
+        // must NOT throw out of an already-finalised free order (which would rob
+        // the buyer of their QR e-ticket comms below). Mirrors the paid path.
+        try {
+            await this.cart.finalizeCartForOrder(customerId, event._id.toString());
+        }
+        catch {
+            // Cart cleanup is advisory; the free order is already finalised.
+        }
         if (createdOrder?._id) {
             // Free orders confirm immediately → record the coupon redemption now.
             await this.recordCouponRedemption(createdOrder);
@@ -728,92 +783,24 @@ class OrderService {
                 eventId: event._id.toString(),
             });
             await this.dispatchOrderConfirmationComms(createdOrder);
+            // Offline guestlist claim → also put the buyer on the host's guestlist
+            // (reusing this order's QR as the single door token). Best-effort + only
+            // fires for offline-link claims of a Guestlist-category ticket.
+            try {
+                await guestlist_service_1.guestlistService.ensureOfflineGuestlistEntry({
+                    order: createdOrder,
+                    event,
+                });
+            }
+            catch (err) {
+                console.error("ensureOfflineGuestlistEntry failed", err);
+            }
         }
         return createdOrder;
     }
-    /**
-     * Guest checkout: a not-logged-in buyer places an order with just their
-     * contact details + selected tickets. Phone is the identity — if an
-     * account already exists we attach the order to it (and the client shows
-     * "we found your account"); otherwise we auto-create a PHONE account so the
-     * tickets live somewhere they can later log into. `guestInfo` is always
-     * stored so guest purchases are countable. Reuses the EXACT online order
-     * flow (seed cart → createOrder), so no money-path logic is duplicated.
-     */
-    async createGuestOrder(input) {
-        if (!input.tickets?.length && !input.extras?.length) {
-            throw new mercurius_1.ErrorWithProps("Select at least one ticket");
-        }
-        // Add-ons can't be bought on their own — require at least one ticket.
-        if (!input.tickets?.length && (input.extras?.length ?? 0) > 0) {
-            throw new mercurius_1.ErrorWithProps("Add-ons can only be purchased together with a ticket. Add at least one ticket to continue.");
-        }
-        const resolved = await (0, customer_resolution_service_1.resolveCustomerForOrder)({
-            phone: input.phone,
-            email: input.email,
-            firstName: input.firstName,
-            lastName: input.lastName,
-            createIfMissing: true,
-        });
-        if (!resolved.customerId) {
-            throw new mercurius_1.ErrorWithProps("Couldn't start checkout — please check your name, email and phone.");
-        }
-        // NOTE: a guest purchase does exactly four things — take the contact
-        // details, create the account if the phone is new, place the order, and
-        // (for a freshly created account) log the buyer in. We deliberately do
-        // NOT silently flip marketing opt-ins here: subscribing someone to
-        // WhatsApp/email from a ticket purchase they didn't consent to is a
-        // surprise side effect. Marketing preferences are set explicitly from the
-        // profile/preferences surfaces, not as a hidden effect of checkout.
-        // Seed the cart for this customer, then run the normal order flow.
-        await this.cart.setCart(resolved.customerId, {
-            eventId: input.eventId,
-            tickets: input.tickets,
-            extras: input.extras ?? [],
-        });
-        const result = await this.createOrder(resolved.customerId, {
-            eventId: input.eventId,
-            guestInfo: {
-                firstName: input.firstName,
-                lastName: input.lastName,
-                email: input.email,
-                phone: input.phone,
-            },
-            utm: input.utm,
-            pageQuery: input.pageQuery,
-            referralCode: input.referralCode,
-            promoterId: input.promoterId,
-            couponCode: input.couponCode,
-        });
-        // Offline payment link → link the created order to its OfflineOrder
-        // exactly (no fuzzy matching). The OfflineOrder flips to PAID when the
-        // order finalises (post-purchase worker reads Order.offlineOrderId).
-        if (input.offlineOrderId && result.order?._id) {
-            await order_schema_1.OrderModel.updateOne({ _id: result.order._id }, {
-                $set: { offlineOrderId: input.offlineOrderId, source: "OFFLINE_LINK" },
-            });
-        }
-        // Always issue a session after guest checkout — the buyer just proved their
-        // identity by completing payment. Existing accounts skip OTP here; that's
-        // intentional (the order is already linked to their account and they've
-        // demonstrated payment-method ownership). Uses the same token utils as the
-        // OTP-verify path; the auth flow is untouched.
-        const uniqueId = (0, nanoid_1.nanoid)();
-        const { accessToken, refreshToken } = (0, jwt_1.createCustomerAuthTokens)({
-            customer: resolved.customerId,
-            version: 0,
-            uniqueId,
-        });
-        await (0, jwt_1.storeCustomerRefreshToken)(resolved.customerId, uniqueId, refreshToken);
-        const session = { accessToken, refreshToken, uniqueId };
-        return {
-            result,
-            accountFound: resolved.existed,
-            accountEmail: resolved.existed ? resolved.accountEmail : undefined,
-            loggedIn: Boolean(session),
-            session,
-        };
-    }
+    // Guest checkout was REMOVED from the API (2026-06-22): a customer must be
+    // logged in to place ANY order. Offline payment links pay through the
+    // authed createOrder (which accepts offlineOrderId).
     /**
      * Resolve a host's offline payment-link short code → prefill payload for the
      * customer checkout (hoizr.com/t/<code>). Public; returns enough to render a
@@ -831,6 +818,12 @@ class OrderService {
         }).lean();
         if (!offline)
             throw new mercurius_1.ErrorWithProps("This link is no longer valid");
+        // Record the FIRST open so the host can tell "sent but never opened" from
+        // "opened, not yet paid". Guarded so only the first resolve stamps it;
+        // best-effort (never block rendering the link on this write).
+        if (!offline.openedAt) {
+            offline_order_schema_1.OfflineOrderModel.updateOne({ _id: offline._id, openedAt: { $exists: false } }, { $set: { openedAt: new Date() } }).catch(() => { });
+        }
         const event = await event_schema_1.EventModel.findById(offline.eventId)
             .select("title slug eventFlyer horizontalFlyer")
             .lean();
@@ -952,6 +945,12 @@ class OrderService {
         }
         else if (selectedPlan) {
             hoizrCommissionPercent = Number(selectedPlan.commissionRate ?? 0);
+        }
+        else if (Number(pricing.grossAmount ?? 0) <= 0) {
+            // Free / RSVP event — nothing is being charged, so there's no commission
+            // to take and no pricing plan is required. (A paid event with unpriced
+            // tickets still errors below because its gross is > 0.)
+            hoizrCommissionPercent = 0;
         }
         else {
             throw new mercurius_1.ErrorWithProps("Event is not priced: select a pricing plan before issuing tickets.");
@@ -1094,26 +1093,21 @@ class OrderService {
                 .select("firstName lastName email phone")
                 .lean()
             : null;
-        const recipientEmail = customer?.email ?? order.guestInfo?.email ?? "";
         const recipientPhone = customer?.phone ?? order.guestInfo?.phone ?? "";
-        const recipientName = [customer?.firstName, customer?.lastName].filter(Boolean).join(" ") ||
-            [order.guestInfo?.firstName, order.guestInfo?.lastName]
-                .filter(Boolean)
-                .join(" ");
-        if (recipientEmail) {
-            await (0, lifecycle_queue_1.enqueueLifecycleEmail)(shared_1.LifecycleEmailType.CUSTOMER_ORDER_PLACED, recipientEmail, recipientName, {
-                orderId: order._id.toString(),
-                totalAmount: Number(order.totalAmount ?? 0),
-                eventId: order.eventId?.toString?.() ?? String(order.eventId),
-            });
-        }
+        // NOTE: the order-confirmation EMAIL is no longer sent from here. Every
+        // confirmed order — free/RSVP, paid, offline — now gets the single rich
+        // QR e-ticket email (CUSTOMER_ORDER_CONFIRMED_WITH_TICKET) from
+        // hoizr-workers: paid via runPaidOrderFanout, free via the post-purchase
+        // worker's dispatchFreeOrderConfirmation. Sending the old bare
+        // CUSTOMER_ORDER_PLACED email here would double-mail the customer. Only
+        // the SMS + analytics fire from this path now.
         if (recipientPhone) {
+            // Dormant: skipped until a MSG91 template is registered for this key.
             await lifecycleSmsQueue.add(shared_1.LifecycleSmsType.CUSTOMER_ORDER_PLACED, {
                 phoneNumber: recipientPhone,
-                message: `Your Hoizr booking is confirmed. Order #${order._id
-                    .toString()
-                    .slice(-6)
-                    .toUpperCase()}. Check email/app for your QR.`,
+                variables: {
+                    orderId: order._id.toString().slice(-6).toUpperCase(),
+                },
             });
         }
         // Server-side conversion event. Every confirmed-order path (free,
@@ -1217,6 +1211,13 @@ class OrderService {
                 new Date(ref.ticketExpiryDateTime) < new Date()) {
                 throw new mercurius_1.ErrorWithProps(`${ref.ticketName} is no longer on sale`);
             }
+            // Multi-day: a day's tickets stop selling at that day's start (all-days
+            // pass at the earliest day start). Re-checked here because the cart can
+            // be up to 13 min older than the order.
+            if ((0, shared_1.isMultiDay)(event) &&
+                (0, shared_1.daySalesClosed)(event, ref.dayId ?? shared_1.ALL_DAYS_TICKET, new Date())) {
+                throw new mercurius_1.ErrorWithProps(`Sales for ${ref.ticketName} have closed — pick another day.`);
+            }
             if (ref.maxTicketPerUser && line.quantity > ref.maxTicketPerUser) {
                 throw new mercurius_1.ErrorWithProps(`${ref.ticketName} allows max ${ref.maxTicketPerUser} per user`);
             }
@@ -1262,6 +1263,15 @@ class OrderService {
             if (line.quantity > available) {
                 throw new mercurius_1.ErrorWithProps(`${ref.name ?? "Add-on"} is no longer available`);
             }
+            // HoizrExtra.linkedTicketTypes: extra scoped to specific ticket types may
+            // only be bought alongside one of those tickets (empty ⇒ any). Mirrors
+            // the cart.setCart guard — re-checked on the authoritative order path.
+            const linked = (ref.linkedTicketTypes ?? []);
+            if (line.quantity > 0 &&
+                linked.length > 0 &&
+                !stored.tickets.some((t) => t.quantity > 0 && linked.includes(t.ticketId))) {
+                throw new mercurius_1.ErrorWithProps(`"${ref.name ?? "This add-on"}" can only be added along with a qualifying ticket`);
+            }
             const unitPrice = Number(ref.price ?? 0);
             // AUDIT-003: stale extras pricing — same shape as the ticket
             // price-match guard above. If a host bumped an add-on price
@@ -1281,6 +1291,50 @@ class OrderService {
                 totalPrice: +(unitPrice * line.quantity).toFixed(2),
             };
         });
+        // Per-user ticket cap (maxTicketPerUser). The per-line check above bounds a
+        // SINGLE order; this bounds the customer's CUMULATIVE confirmed tickets for
+        // each ticket type, so a buyer can't grab the whole allocation across
+        // repeat orders (notably free RSVPs). Refunded / cancelled / superseded /
+        // pending orders don't count. Best-effort under high concurrency (two
+        // simultaneous orders could both pass), but capacity oversell stays fully
+        // protected by the atomic $inc guard at finalize.
+        const cappedLines = orderTickets.filter((line) => {
+            const ref = ticketMap.get(line.ticketTypeId);
+            return ref?.maxTicketPerUser && Number(ref.maxTicketPerUser) > 0;
+        });
+        if (cappedLines.length) {
+            const priorAgg = await order_schema_1.OrderModel.aggregate([
+                {
+                    $match: {
+                        customerId,
+                        eventId: input.eventId,
+                        orderStatus: {
+                            $in: [shared_1.OrderStatus.PAYMENT_SUCCESS, shared_1.OrderStatus.CHECKED_IN],
+                        },
+                        isDeleted: false,
+                    },
+                },
+                { $unwind: "$tickets" },
+                {
+                    $group: {
+                        _id: "$tickets.ticketTypeId",
+                        qty: { $sum: "$tickets.quantity" },
+                    },
+                },
+            ]);
+            const priorByType = new Map(priorAgg.map((r) => [String(r._id), Number(r.qty ?? 0)]));
+            for (const line of cappedLines) {
+                const ref = ticketMap.get(line.ticketTypeId);
+                const cap = Number(ref.maxTicketPerUser);
+                const prior = priorByType.get(line.ticketTypeId) ?? 0;
+                if (prior + Number(line.quantity) > cap) {
+                    const remaining = Math.max(0, cap - prior);
+                    throw new mercurius_1.ErrorWithProps(remaining === 0
+                        ? `You've reached the limit of ${cap} "${ref.ticketName}" per person.`
+                        : `You can book at most ${cap} "${ref.ticketName}" per person — you already have ${prior}, so you can add ${remaining} more.`);
+                }
+            }
+        }
         // Venue-wide capacity guard. Per-ticket caps can sum higher than the
         // venue allows (e.g. 100 GA + 50 VIP at a 120-cap venue). Defends
         // against the rare case where maxCapacity was lowered between cart
@@ -1336,6 +1390,11 @@ class OrderService {
         else if (selectedPlan) {
             hoizrCommissionPercent = Number(selectedPlan.commissionRate ?? 0);
         }
+        else if (Number(grossAmount ?? 0) <= 0) {
+            // Free / RSVP order — nothing charged, no commission, no pricing plan
+            // needed. Paid orders with an unpriced event still error below.
+            hoizrCommissionPercent = 0;
+        }
         else {
             throw new mercurius_1.ErrorWithProps("Event is not priced: host must select a pricing plan before tickets can be sold.");
         }
@@ -1361,6 +1420,29 @@ class OrderService {
                 }
                 : undefined,
         });
+        // IDOR guard (security review 2026-06-22): when linking to a host's offline
+        // payment link, verify it's real, belongs to THIS event, and is still
+        // awaiting payment — so a customer can't attach their order to an arbitrary,
+        // already-paid/cancelled/expired, or cross-event offline link. Runs BEFORE
+        // the free branch so ₹0 offline links are validated too (the free path also
+        // stamps offlineOrderId now).
+        if (input.offlineOrderId) {
+            if (!(0, validations_1.isAlphanumeric)(input.offlineOrderId)) {
+                throw new mercurius_1.ErrorWithProps("Invalid payment link.");
+            }
+            const offline = await offline_order_schema_1.OfflineOrderModel.findById(input.offlineOrderId)
+                .select("status linkedOrderId eventId isDeleted")
+                .lean();
+            if (!offline ||
+                offline.isDeleted === true ||
+                String(offline.eventId) !== String(event._id) ||
+                offline.linkedOrderId ||
+                offline.status === "PAID" ||
+                offline.status === "CANCELLED" ||
+                offline.status === "EXPIRED") {
+                throw new mercurius_1.ErrorWithProps("This payment link is no longer valid.");
+            }
+        }
         if (pricing.totalAmount <= 0) {
             const order = await this.finalizeFreeOrder(customerId, event, input, orderTickets, orderExtras, pricing, reservedAt, appliedConfigSnapshot, appliedDiscount);
             return { order };
@@ -1374,6 +1456,7 @@ class OrderService {
             const checkout = await this.ensureRazorpayOrder(pending, event._id.toString(), customerId, pricing.totalAmount);
             return { order: pending.toObject ? pending.toObject() : pending, checkout };
         }
+        // (offlineOrderId already validated above, before the free branch.)
         const created = await order_schema_1.OrderModel.create({
             customerId,
             guestInfo: input.guestInfo,
@@ -1403,6 +1486,12 @@ class OrderService {
             pageQuery: input.pageQuery,
             promoterId: input.promoterId,
             referralCode: input.referralCode,
+            // Link to a host's offline payment link when the customer paid via /t/<code>
+            // (now an authed flow — guest checkout removed). The post-purchase worker
+            // reads Order.offlineOrderId to flip the OfflineOrder to PAID.
+            ...(input.offlineOrderId
+                ? { offlineOrderId: input.offlineOrderId, source: "OFFLINE_LINK" }
+                : {}),
         });
         const checkout = await this.ensureRazorpayOrder(created, event._id.toString(), customerId, pricing.totalAmount);
         await this.supersedeSiblingPendingOrders(customerId, event._id.toString(), created._id.toString());
@@ -1464,6 +1553,52 @@ class OrderService {
             expiresAt,
             dateOfIssue: invoice.dateOfIssue,
         };
+    }
+    /**
+     * On-demand "get-or-generate" invoice. Recovers orders whose invoice was
+     * missed by the best-effort post-payment fanout (the only other generation
+     * trigger), which logs-and-swallows failures with no retry.
+     *  - Invoice already on file → return it now (READY) with a fresh signed URL.
+     *  - Order has no booking fee → NO_INVOICE_FREE_ORDER (the generator returns
+     *    null for these, so enqueuing would make the client poll forever).
+     *  - Otherwise → enqueue the EXISTING idempotent worker generator with a
+     *    deterministic jobId (`invoice:<orderId>`) so concurrent triggers (this
+     *    mutation racing the fanout) dedupe to a single PDF + invoice number, and
+     *    report GENERATING (client polls getMyOrderInvoice).
+     */
+    async generateMyOrderInvoice(customerId, orderId) {
+        if (!(0, validations_1.isAlphanumeric)(orderId)) {
+            throw new mercurius_1.ErrorWithProps("Invalid order id");
+        }
+        const order = await order_schema_1.OrderModel.findOne({
+            _id: orderId,
+            customerId,
+            isDeleted: false,
+        })
+            .select("_id platformFee source razorpayPaymentId")
+            .lean();
+        if (!order)
+            throw new mercurius_1.ErrorWithProps("Order not found");
+        // Already issued (and not voided) → hand back a freshly-signed link.
+        const existing = await this.getMyOrderInvoice(customerId, orderId);
+        if (existing)
+            return { status: "READY", invoice: existing };
+        // A free / zero-booking-fee order has no tax invoice to issue — only the
+        // booking fee + its GST is invoiced. Same for host-issued CASH orders:
+        // the booking fee was never collected by Hoizr. Both match the worker
+        // generator's null short-circuits, so don't enqueue (it would never
+        // resolve and the client would poll forever).
+        if (Number(order.platformFee ?? 0) <= 0 ||
+            order.source === "OFFLINE_ISSUED" ||
+            /^(offline_|free_)/.test(String(order.razorpayPaymentId ?? ""))) {
+            return { status: "NO_INVOICE_FREE_ORDER", invoice: null };
+        }
+        await postPurchaseQueue.add("GENERATE_CUSTOMER_INVOICE", { orderId: order._id.toString() }, {
+            jobId: `invoice:${order._id.toString()}`,
+            attempts: 3,
+            backoff: { type: "exponential", delay: 3000 },
+        });
+        return { status: "GENERATING", invoice: null };
     }
     async requestOrderRefund(customerId, orderId, reason) {
         if (!(0, validations_1.isAlphanumeric)(orderId)) {

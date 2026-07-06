@@ -86,6 +86,12 @@ const zodEnvSchema = z.object({
   // surfaces a clear error so misconfigured environments fail loud
   // rather than 200-OKing with empty results.
   MAPS_API_KEY: z.string().optional(),
+
+  // Waitlist social collection: while Meta app verification is pending we
+  // collect plain-string handles at waitlist-join instead of the verified
+  // Instagram Connect. Flip to "true" once verified to switch to Connect.
+  // Source of truth for the gate — hoizr-client reads a mirror for UI only.
+  META_VERIFIED: z.string().optional().default("false"),
 });
 
 type TEnv = z.infer<typeof zodEnvSchema>;

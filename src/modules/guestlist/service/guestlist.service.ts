@@ -365,12 +365,14 @@ class GuestlistService {
                 day: "2-digit",
                 month: "long",
                 year: "numeric",
+                timeZone: "Asia/Kolkata",
               }).format(start)
             : "",
           eventTime: start
             ? new Intl.DateTimeFormat("en-IN", {
                 hour: "2-digit",
                 minute: "2-digit",
+                timeZone: "Asia/Kolkata",
               }).format(start)
             : "",
           venueName:
