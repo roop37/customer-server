@@ -225,10 +225,25 @@ class OrderService {
     return reservedAtDate;
   }
 
-  private assertEventBookable(event: any): void {
+  private assertEventBookable(event: any, viaOfflineLink = false): void {
     const now = new Date();
     if (!event.ticketingEnabled) {
       throw new ErrorWithProps("Ticketing is not enabled for this event");
+    }
+    // Waitlist collect-mode (waitlist-only, or the pre-sale window before
+    // waitlistExpiry): the only sanctioned purchase is a host-sent offline
+    // payment link. Presence of offlineOrderId is enough to pass here — its
+    // authenticity is enforced by the IDOR guard in createOrder, which throws
+    // on any bogus/cross-event/consumed link before an order is created.
+    if (
+      !viaOfflineLink &&
+      event.waitlistEnabled &&
+      (event.waitlistOnly ||
+        (event.waitlistExpiry && new Date(event.waitlistExpiry) > now))
+    ) {
+      throw new ErrorWithProps(
+        "Tickets for this event are released through its waitlist — join the waitlist to request a spot."
+      );
     }
     if (event.ticketSalesStartDate && new Date(event.ticketSalesStartDate) > now) {
       throw new ErrorWithProps("Ticket sales are not open yet");
@@ -1530,7 +1545,7 @@ class OrderService {
       );
     }
     const reservedAt = this.assertCartReservationActive(stored.reservedAt);
-    this.assertEventBookable(event);
+    this.assertEventBookable(event, !!input.offlineOrderId);
 
     const ticketMap = new Map(
       (event.tickets ?? []).map((t) => [String(t._id), t])
