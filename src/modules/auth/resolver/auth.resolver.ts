@@ -37,9 +37,10 @@ export class AuthResolver {
 
   @Mutation(() => CustomerOtpResponse)
   async customerRequestOtp(
-    @Arg("input") input: CustomerOtpRequestInput
+    @Arg("input") input: CustomerOtpRequestInput,
+    @Ctx() ctx: Context
   ): Promise<CustomerOtpResponse> {
-    return this.service.requestOtp(input);
+    return this.service.requestOtp(input, { ip: ctx.req.ip });
   }
 
   @Mutation(() => CustomerAuthResponse)

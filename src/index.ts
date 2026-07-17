@@ -29,7 +29,14 @@ import {
 
 dotenv.config();
 
-const app = Fastify({ logger: false });
+// trustProxy so req.ip is the real client behind the LB/CDN — the per-IP OTP
+// cap (auth.service) depends on it; without it every user shares the proxy IP
+// and the cap locks out everyone at once. `true` trusts X-Forwarded-For (safe
+// only if the LB strips inbound XFF). ponytail: set to the real hop count at
+// deploy if the LB does NOT strip inbound XFF, else clients can spoof it. The
+// per-phone + global OTP caps still bind regardless, so a spoofed IP only
+// evades the per-IP layer — it can't drain the SMS budget.
+const app = Fastify({ logger: false, trustProxy: true });
 
 async function startServer() {
   try {

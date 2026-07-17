@@ -24,6 +24,7 @@ import { EnvVars } from "../../../utils/environment";
 import { signQrPayload } from "../../../utils/qr-hash";
 import { getRazorpayPayments } from "../../../utils/razorpay.client";
 import { RedisKeys, redisClient } from "../../../utils/redis";
+import { enforceRateLimit } from "../../../utils/rateLimit";
 import { isAlphanumeric } from "../../../utils/validations";
 import CartService, {
   CartTicketRef,
@@ -167,30 +168,12 @@ class OrderService {
     host:
       | (CartHostGstContext & { registeredStateCode?: string | null })
       | null;
-    aiBoost?: {
-      feeRupees: number;
-      gstPercent: number;
-      adjustmentMode?: string;
-      offerId?: string;
-    };
   }) {
     const eligible = !!(
       input.host?.isGstRegistered &&
       input.host?.gstin &&
       (input.host?.gstRegistrationType === "REGULAR" ||
         input.host?.gstRegistrationType === "CASUAL_TAXABLE_PERSON")
-    );
-    // AUDIT-007: lock AI Boost amount + mode at order creation so the
-    // settlement reads from the order snapshot (immutable per order)
-    // instead of the live Event document (mutable mid-event).
-    const aiBoostFeeRupees = Math.max(0, Number(input.aiBoost?.feeRupees ?? 0));
-    const aiBoostFeeGstPercent = Math.max(
-      0,
-      Number(input.aiBoost?.gstPercent ?? 0)
-    );
-    const aiBoostFeePaise = Math.round(aiBoostFeeRupees * 100);
-    const aiBoostFeeGstPaise = Math.round(
-      aiBoostFeeRupees * (aiBoostFeeGstPercent / 100) * 100
     );
     return {
       platformFeePercent: input.platformFeePercent,
@@ -202,10 +185,6 @@ class OrderService {
       hostGstin: input.host?.gstin ?? undefined,
       hostStateCode: input.host?.registeredStateCode ?? undefined,
       currency: "INR",
-      aiBoostFeePaise,
-      aiBoostFeeGstPaise,
-      aiBoostAdjustmentMode: input.aiBoost?.adjustmentMode,
-      aiBoostOfferId: input.aiBoost?.offerId,
       capturedAt: new Date(),
     };
   }
@@ -980,8 +959,6 @@ class OrderService {
           hoizrCommission: 0,
           hoizrCommissionPercent: 0,
           razorpayFee: 0,
-          finalDeclaredCommission: 0,
-          finalDeclaredOfferAmount: 0,
           appliedConfigSnapshot,
           orderStatus: OrderStatus.PAYMENT_SUCCESS,
           reservedAt,
@@ -1273,33 +1250,9 @@ class OrderService {
       host
     );
 
-    const selectedPlan = event.pricingSnapshot;
-    const aiCommissionPct =
-      typeof event.aiSelectedCommissionPct === "number"
-        ? event.aiSelectedCommissionPct
-        : undefined;
-    let hoizrCommissionPercent: number;
-    if (typeof aiCommissionPct === "number") {
-      hoizrCommissionPercent = aiCommissionPct;
-    } else if (selectedPlan) {
-      hoizrCommissionPercent = Number(selectedPlan.commissionRate ?? 0);
-    } else if (Number(pricing.grossAmount ?? 0) <= 0) {
-      // Free / RSVP event — nothing is being charged, so there's no commission
-      // to take and no pricing plan is required. (A paid event with unpriced
-      // tickets still errors below because its gross is > 0.)
-      hoizrCommissionPercent = 0;
-    } else {
-      throw new ErrorWithProps(
-        "Event is not priced: select a pricing plan before issuing tickets."
-      );
-    }
-    const aiBoostFeeRupees = Number(
-      event.aiSelectedExtraAmount ?? selectedPlan?.upfrontFee ?? 0
-    );
-    const aiBoostGstPercent = await getCachedConfigNumber(
-      ConfigTypeEnum.gstOnAiBoost,
-      18
-    );
+    // Single fixed commission model: the event carries one frozen rate
+    // (stamped at publish, admin-editable until the event starts).
+    const hoizrCommissionPercent = Number(event.commissionRate ?? 0);
     const appliedConfigSnapshot = this.buildConfigSnapshot({
       platformFeePercent: applicationFeePercent,
       platformFeeGstPercent: applicationFeeGstPercent,
@@ -1307,15 +1260,6 @@ class OrderService {
       hoizrCommissionGstPercent,
       ticketGstPercent: pricing.taxesPercent,
       host,
-      aiBoost:
-        aiBoostFeeRupees > 0
-          ? {
-              feeRupees: aiBoostFeeRupees,
-              gstPercent: aiBoostGstPercent,
-              adjustmentMode: event.feeSettlementMode,
-              offerId: event.selectedAiBoostGenerationId,
-            }
-          : undefined,
     });
 
     // If a customer already exists for this phone/email, attach the order to
@@ -1359,8 +1303,6 @@ class OrderService {
           hoizrCommission: 0,
           hoizrCommissionPercent,
           razorpayFee: 0,
-          finalDeclaredCommission: 0,
-          finalDeclaredOfferAmount: 0,
           appliedConfigSnapshot,
           orderStatus: OrderStatus.PAYMENT_SUCCESS,
           reservedAt: new Date(),
@@ -1557,6 +1499,12 @@ class OrderService {
     customerId: string,
     input: CreateOrderInput
   ): Promise<CreateOrderServiceResult> {
+    // Order-spam / inventory-lock griefing guard. Shared across first-party
+    // and open-server channels (both hit this method). 5 create attempts /
+    // customer / 10 min, and a coarser per-event burst ceiling.
+    await enforceRateLimit(`order_create_customer:${customerId}`, 5, 10 * 60);
+    await enforceRateLimit(`order_create_event:${input.eventId}`, 300, 60);
+
     const event = await EventModel.findOne({
       _id: input.eventId,
       isDeleted: false,
@@ -1830,42 +1778,11 @@ class OrderService {
         ? this.buildCouponSnapshot(couponResolved.coupon, pricing.discountAmount)
         : undefined;
 
-    // Resolve Hoizr commission first so we can include it in the config
-    // snapshot for both free and paid orders. AI-selected rate wins,
-    // fallback to the basic pricing plan; hard fail otherwise — we
-    // never silently apply a default rate.
-    const selectedPlan = event.pricingSnapshot;
-    const aiCommissionPct =
-      typeof event.aiSelectedCommissionPct === "number"
-        ? event.aiSelectedCommissionPct
-        : undefined;
-
-    let hoizrCommissionPercent: number;
-    if (typeof aiCommissionPct === "number") {
-      hoizrCommissionPercent = aiCommissionPct;
-    } else if (selectedPlan) {
-      hoizrCommissionPercent = Number(selectedPlan.commissionRate ?? 0);
-    } else if (Number(grossAmount ?? 0) <= 0) {
-      // Free / RSVP order — nothing charged, no commission, no pricing plan
-      // needed. Paid orders with an unpriced event still error below.
-      hoizrCommissionPercent = 0;
-    } else {
-      throw new ErrorWithProps(
-        "Event is not priced: host must select a pricing plan before tickets can be sold."
-      );
-    }
-
-    // AUDIT-007: lock AI Boost fee + mode at order creation. Reading
-    // these from the live Event at settlement would let a host change
-    // their active offer mid-event and have it retro-apply to orders
-    // that were paid against the old rate. Snapshot it here.
-    const aiBoostFeeRupees = Number(
-      event.aiSelectedExtraAmount ?? selectedPlan?.upfrontFee ?? 0
-    );
-    const aiBoostGstPercent = await getCachedConfigNumber(
-      ConfigTypeEnum.gstOnAiBoost,
-      18
-    );
+    // Resolve Hoizr commission so we can include it in the config
+    // snapshot for both free and paid orders. Single fixed commission
+    // model: the event carries one frozen rate (stamped at publish,
+    // admin-editable until the event starts).
+    const hoizrCommissionPercent = Number(event.commissionRate ?? 0);
 
     const appliedConfigSnapshot = this.buildConfigSnapshot({
       platformFeePercent: applicationFeePercent,
@@ -1874,15 +1791,6 @@ class OrderService {
       hoizrCommissionGstPercent,
       ticketGstPercent: pricing.taxesPercent,
       host,
-      aiBoost:
-        aiBoostFeeRupees > 0
-          ? {
-              feeRupees: aiBoostFeeRupees,
-              gstPercent: aiBoostGstPercent,
-              adjustmentMode: event.feeSettlementMode,
-              offerId: event.selectedAiBoostGenerationId,
-            }
-          : undefined,
     });
 
     // IDOR guard (security review 2026-06-22): when linking to a host's offline
@@ -1931,11 +1839,6 @@ class OrderService {
       (hoizrCommissionPercent / 100)
     ).toFixed(2);
 
-    const finalDeclaredOfferAmount = Number(
-      event.aiSelectedExtraAmount ?? selectedPlan?.upfrontFee ?? 0
-    );
-    const finalDeclaredCommission = hoizrCommission;
-
     const pending = await this.reusablePendingOrder(
       customerId,
       event._id.toString(),
@@ -1975,9 +1878,6 @@ class OrderService {
       hoizrCommission,
       hoizrCommissionPercent,
       razorpayFee: 0,
-      selectedOptionId: selectedPlan?.optionId,
-      finalDeclaredCommission,
-      finalDeclaredOfferAmount,
       appliedConfigSnapshot,
       orderStatus: OrderStatus.PAYMENT_PENDING,
       reservedAt,

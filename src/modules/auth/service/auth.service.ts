@@ -6,6 +6,7 @@ import OtpService from "../../otp/service/otp.service";
 import { enqueueLifecycleEmail } from "../../../utils/lifecycle.queue";
 import {
   checkRateLimit,
+  enforceRateLimit,
   incrementRateLimit,
   resetRateLimit,
 } from "../../../utils/rateLimit";
@@ -24,7 +25,8 @@ class AuthService {
   private otp = new OtpService();
 
   async requestOtp(
-    input: CustomerOtpRequestInput
+    input: CustomerOtpRequestInput,
+    opts?: { ip?: string }
   ): Promise<{ otpId: string; profileRequired: boolean }> {
     const normalized = normalizeCustomerPhone(input.phone);
     if (!normalized) {
@@ -42,6 +44,17 @@ class AuthService {
       );
     }
     await incrementRateLimit(rlKey);
+
+    // Per-IP cap: blunts a botnet rotating phone numbers from one origin.
+    // 10 OTP requests / 10 min / IP. Shared across first-party and
+    // open-server channels (both call this method).
+    if (opts?.ip) {
+      await enforceRateLimit(`customer_otp_ip:${opts.ip}`, 10, 10 * 60);
+    }
+    // Global SMS/OTP budget: a platform-wide circuit breaker so total OTP
+    // spend can't be drained even across many IPs. 5000 / day (tune via
+    // Configs later). Keyed on a rolling 24h window.
+    await enforceRateLimit(`customer_otp_global`, 5000, 24 * 60 * 60);
 
     // Dual-lookup: match by either E.164 (post-backfill records) OR raw
     // input (pre-backfill records whose `phone` is still in legacy form).
