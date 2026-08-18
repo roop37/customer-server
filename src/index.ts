@@ -11,6 +11,7 @@ import { buildTypeDefsAndResolvers } from "type-graphql";
 import { logger } from "./log/logger";
 import { resolvers as typedResolvers } from "./resolvers/index.resolver";
 import { registerInstagramOAuth } from "./routes/instagram-oauth.route";
+import { registerSwiggyOAuth } from "./routes/swiggy-oauth.route";
 import { registerInternalOfflineOrderRoute } from "./routes/internal-offline-order.route";
 import { registerRazorpayWebhook } from "./routes/razorpay-webhook.route";
 import Context from "./types/context.type";
@@ -203,6 +204,7 @@ async function startServer() {
     registerRazorpayWebhook(app);
     registerInternalOfflineOrderRoute(app);
     registerInstagramOAuth(app);
+    registerSwiggyOAuth(app);
 
     app.get("/", async (_req, res) => {
       res.status(200).send("Hoizr customer-server healthy");
