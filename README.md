@@ -4,7 +4,7 @@
 
 The ticket buyer and door-scanner GraphQL API for Hoizr: sign-in, Redis-held carts, Razorpay checkout and check-in.
 
-[Hoizr walkthrough](https://github.com/Hoizr-Technology/hoizr-walkthrough) · [Architecture](https://github.com/Hoizr-Technology/hoizr-walkthrough/blob/main/docs/01-system-architecture.md) · [Local setup](https://github.com/Hoizr-Technology/hoizr-walkthrough/blob/main/docs/09-local-development.md) · [Contributing](https://github.com/Hoizr-Technology/.github/blob/main/CONTRIBUTING.md)
+[Hoizr walkthrough](https://github.com/roop37/hoizr-walkthrough) · [Architecture](https://github.com/roop37/hoizr-walkthrough/blob/main/docs/01-system-architecture.md) · [Local setup](https://github.com/roop37/hoizr-walkthrough/blob/main/docs/09-local-development.md) · [Contributing](https://github.com/roop37/hoizr-dotgithub/blob/main/CONTRIBUTING.md)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Fastify 5](https://img.shields.io/badge/Fastify-%5E5.1-000000?logo=fastify&logoColor=white)](https://fastify.dev/docs/latest/)
@@ -36,9 +36,9 @@ flowchart LR
 
 ## About
 
-`customer-server` is the public-facing API of Hoizr, an event ticketing, fan CRM and door-scanning platform for India. Ticket buyers reach it through the [hoizr-client](https://github.com/Hoizr-Technology/hoizr-client) storefront, and door staff reach it through the Flutter [hoizr-scanner-app](https://github.com/Hoizr-Technology/hoizr-scanner-app). It owns the hot path of a sale: browsing published events and venues, holding inventory in Redis while a buyer decides, pricing the cart in integer paise, creating the Razorpay order, finalising the payment inside a MongoDB transaction, and admitting the ticket holder at the door.
+`customer-server` is the public-facing API of Hoizr, an event ticketing, fan CRM and door-scanning platform for India. Ticket buyers reach it through the [hoizr-client](https://github.com/roop37/hoizr-client) storefront, and door staff reach it through the Flutter [hoizr-scanner-app](https://github.com/roop37/hoizr-scanner-app). It owns the hot path of a sale: browsing published events and venues, holding inventory in Redis while a buyer decides, pricing the cart in integer paise, creating the Razorpay order, finalising the payment inside a MongoDB transaction, and admitting the ticket holder at the door.
 
-Venues and event organizers do not use this server. They manage events, scanners, coupons and offline tickets through [main-server](https://github.com/Hoizr-Technology/main-server), which writes the data this API reads. Slow side effects (ticket emails, SMS, invoices, webhook finalisation, ledger entries) are pushed onto BullMQ and run in [hoizr-worker](https://github.com/Hoizr-Technology/hoizr-worker). The [Hoizr walkthrough](https://github.com/Hoizr-Technology/hoizr-walkthrough) explains the whole system.
+Venues and event organizers do not use this server. They manage events, scanners, coupons and offline tickets through [main-server](https://github.com/roop37/main-server), which writes the data this API reads. Slow side effects (ticket emails, SMS, invoices, webhook finalisation, ledger entries) are pushed onto BullMQ and run in [hoizr-worker](https://github.com/roop37/hoizr-worker). The [Hoizr walkthrough](https://github.com/roop37/hoizr-walkthrough) explains the whole system.
 
 ## Contents
 
@@ -131,7 +131,7 @@ Versions are the ranges declared in [package.json](package.json).
 | @fastify/cookie, cors, helmet | ^11.0.1, ^10.0.1, ^12.0.1 | HTTP-only auth cookies, origin allowlist, security headers | [Fastify ecosystem](https://fastify.dev/ecosystem/) |
 | fastify-raw-body | ^5.0.0 | Raw request body for HMAC checks on two routes | [fastify-raw-body](https://github.com/Eomm/fastify-raw-body) |
 | axios, cloudinary, qrcode, winston | ^1.7.2, ^2.2.0, ^1.5.4, ^3.17.0 | Razorpay/Places REST calls, signed PDF URLs, guestlist QR PNGs, logging | [axios](https://axios-http.com/docs/intro) · [Cloudinary](https://cloudinary.com/documentation/node_integration) |
-| @hoizr-technology/shared | ^0.1.121 | Shared domain model: Typegoose classes, enums, queue names, HMAC and phone helpers | [hoizr-shared](https://github.com/Hoizr-Technology/hoizr-shared) |
+| @hoizr-technology/shared | ^0.1.121 | Shared domain model: Typegoose classes, enums, queue names, HMAC and phone helpers | [hoizr-shared](https://github.com/roop37/hoizr-shared) |
 
 External services:
 
@@ -398,9 +398,9 @@ Queue names come from `QueueNames` in `@hoizr-technology/shared`. `hoizr-worker`
 - **Redis 6.2 or newer.**
 - **A GitHub personal access token (classic) with `read:packages`** to install `@hoizr-technology/shared` from GitHub Packages (see below).
 - Other Hoizr services:
-  - [hoizr-worker](https://github.com/Hoizr-Technology/hoizr-worker) for OTP delivery, emails, invoices and webhook finalisation. Without it, jobs wait in Redis and nothing is sent.
-  - [main-server](https://github.com/Hoizr-Technology/main-server) to create the venues, events, scanners and coupons this API reads, and for offline tickets. Both servers must share the same JWT key pair and cookie/encryption secrets.
-  - [hoizr-client](https://github.com/Hoizr-Technology/hoizr-client) if you want a UI on top.
+  - [hoizr-worker](https://github.com/roop37/hoizr-worker) for OTP delivery, emails, invoices and webhook finalisation. Without it, jobs wait in Redis and nothing is sent.
+  - [main-server](https://github.com/roop37/main-server) to create the venues, events, scanners and coupons this API reads, and for offline tickets. Both servers must share the same JWT key pair and cookie/encryption secrets.
+  - [hoizr-client](https://github.com/roop37/hoizr-client) if you want a UI on top.
 
 ### 1. Install
 
@@ -411,13 +411,13 @@ Queue names come from `QueueNames` in `@hoizr-technology/shared`. `hoizr-worker`
 ```
 
 ```bash
-git clone https://github.com/Hoizr-Technology/customer-server.git
+git clone https://github.com/roop37/customer-server.git
 cd customer-server
 export GITHUB_TOKEN=<your classic PAT with read:packages>
 npm install
 ```
 
-**Alternative: build `hoizr-shared` locally.** Clone [hoizr-shared](https://github.com/Hoizr-Technology/hoizr-shared) next to this repo, run `npm install && npm run build` there, then run `npm install ../hoizr-shared` here (this rewrites the dependency to a `file:` link; do not commit that change). A linked package brings its own copies of `graphql`, `type-graphql`, `mongoose` and `@typegoose/typegoose`, and two copies break `instanceof` checks during schema build. The `predev`, `prebuild` and `prestart` hooks run [scripts/dedupe-shared-deps.js](scripts/dedupe-shared-deps.js), which replaces those copies with symlinks to this repo's versions. [tsconfig.verify.json](tsconfig.verify.json) type-checks against `../hoizr-shared/dist` without changing `package.json`.
+**Alternative: build `hoizr-shared` locally.** Clone [hoizr-shared](https://github.com/roop37/hoizr-shared) next to this repo, run `npm install && npm run build` there, then run `npm install ../hoizr-shared` here (this rewrites the dependency to a `file:` link; do not commit that change). A linked package brings its own copies of `graphql`, `type-graphql`, `mongoose` and `@typegoose/typegoose`, and two copies break `instanceof` checks during schema build. The `predev`, `prebuild` and `prestart` hooks run [scripts/dedupe-shared-deps.js](scripts/dedupe-shared-deps.js), which replaces those copies with symlinks to this repo's versions. [tsconfig.verify.json](tsconfig.verify.json) type-checks against `../hoizr-shared/dist` without changing `package.json`.
 
 ### 2. Configure
 
@@ -501,7 +501,7 @@ There are no lint, format or codegen scripts in this repo.
 - **Large service files.** [order.service.ts](src/modules/order/service/order.service.ts) is about 2,400 lines and repeats the conditional-increment block in several finalise paths.
 - **Production hardening (roadmap).** Gate developer tooling (GraphiQL) and development CORS origins on `SERVER_ENV`.
 
-See [known gaps and roadmap](https://github.com/Hoizr-Technology/hoizr-walkthrough/blob/main/docs/12-known-gaps-and-roadmap.md) for the system-wide list.
+See [known gaps and roadmap](https://github.com/roop37/hoizr-walkthrough/blob/main/docs/12-known-gaps-and-roadmap.md) for the system-wide list.
 
 ### Good first issues
 
@@ -515,9 +515,9 @@ See [known gaps and roadmap](https://github.com/Hoizr-Technology/hoizr-walkthrou
 
 Hoizr is being opened up so it can grow with the community, and contributions of any size are welcome: a failing test, a doc fix, or one of the issues above. Start with the organization-wide guides:
 
-- [Contributing guide](https://github.com/Hoizr-Technology/.github/blob/main/CONTRIBUTING.md)
-- [Code of conduct](https://github.com/Hoizr-Technology/.github/blob/main/CODE_OF_CONDUCT.md)
-- [Security policy](https://github.com/Hoizr-Technology/.github/blob/main/SECURITY.md)
+- [Contributing guide](https://github.com/roop37/hoizr-dotgithub/blob/main/CONTRIBUTING.md)
+- [Code of conduct](https://github.com/roop37/hoizr-dotgithub/blob/main/CODE_OF_CONDUCT.md)
+- [Security policy](https://github.com/roop37/hoizr-dotgithub/blob/main/SECURITY.md)
 
 > [!IMPORTANT]
 > Please report security vulnerabilities privately as described in the security policy, not in public issues.
@@ -526,20 +526,20 @@ Hoizr is being opened up so it can grow with the community, and contributions of
 
 | Repository | Role |
 |---|---|
-| [hoizr-walkthrough](https://github.com/Hoizr-Technology/hoizr-walkthrough) | Guided tour of the whole system: architecture, flows, local setup |
-| [main-server](https://github.com/Hoizr-Technology/main-server) | Business, admin and artist GraphQL API (Fastify + Mercurius + TypeGraphQL) |
-| [hoizr-worker](https://github.com/Hoizr-Technology/hoizr-worker) | BullMQ workers and node-cron jobs (Asia/Kolkata) for every async side effect |
-| [tracking-server](https://github.com/Hoizr-Technology/tracking-server) | Write-only analytics ingest into BullMQ |
-| [hoizr-shared](https://github.com/Hoizr-Technology/hoizr-shared) | `@hoizr-technology/shared`: domain model, enums, queue names, ledger, HMAC helpers |
-| [hoizr-client](https://github.com/Hoizr-Technology/hoizr-client) | Customer storefront, Next.js 14 App Router |
-| [business-client](https://github.com/Hoizr-Technology/business-client) | Venue and organizer dashboard, plus the business.hoizr.com marketing site |
-| [internal-admin-client](https://github.com/Hoizr-Technology/internal-admin-client) | Internal operations console, Next.js 14 App Router |
-| [hoizr-artist-client](https://github.com/Hoizr-Technology/hoizr-artist-client) | Artist dashboard and editorial landing, Next.js 14 App Router |
-| [hoizr-scanner-app](https://github.com/Hoizr-Technology/hoizr-scanner-app) | Flutter door check-in app with offline support |
+| [hoizr-walkthrough](https://github.com/roop37/hoizr-walkthrough) | Guided tour of the whole system: architecture, flows, local setup |
+| [main-server](https://github.com/roop37/main-server) | Business, admin and artist GraphQL API (Fastify + Mercurius + TypeGraphQL) |
+| [hoizr-worker](https://github.com/roop37/hoizr-worker) | BullMQ workers and node-cron jobs (Asia/Kolkata) for every async side effect |
+| [tracking-server](https://github.com/roop37/tracking-server) | Write-only analytics ingest into BullMQ |
+| [hoizr-shared](https://github.com/roop37/hoizr-shared) | `@hoizr-technology/shared`: domain model, enums, queue names, ledger, HMAC helpers |
+| [hoizr-client](https://github.com/roop37/hoizr-client) | Customer storefront, Next.js 14 App Router |
+| [business-client](https://github.com/roop37/business-client) | Venue and organizer dashboard, plus the business.hoizr.com marketing site |
+| [internal-admin-client](https://github.com/roop37/internal-admin-client) | Internal operations console, Next.js 14 App Router |
+| [hoizr-artist-client](https://github.com/roop37/hoizr-artist-client) | Artist dashboard and editorial landing, Next.js 14 App Router |
+| [hoizr-scanner-app](https://github.com/roop37/hoizr-scanner-app) | Flutter door check-in app with offline support |
 
 ## Author
 
-Built by [@sanbedan-debox](https://github.com/sanbedan-debox) as part of Hoizr.
+Built by [@roop37](https://github.com/roop37) as part of Hoizr.
 
 ## License
 
