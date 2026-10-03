@@ -13,6 +13,7 @@ const mercurius_1 = require("mercurius");
 const qr_hash_1 = require("../../../utils/qr-hash");
 const razorpay_client_1 = require("../../../utils/razorpay.client");
 const redis_1 = require("../../../utils/redis");
+const rateLimit_1 = require("../../../utils/rateLimit");
 const validations_1 = require("../../../utils/validations");
 const cart_service_1 = __importDefault(require("../../cart/service/cart.service"));
 const customer_schema_1 = require("../../customer/schema/customer.schema");
@@ -123,13 +124,6 @@ class OrderService {
             input.host?.gstin &&
             (input.host?.gstRegistrationType === "REGULAR" ||
                 input.host?.gstRegistrationType === "CASUAL_TAXABLE_PERSON"));
-        // AUDIT-007: lock AI Boost amount + mode at order creation so the
-        // settlement reads from the order snapshot (immutable per order)
-        // instead of the live Event document (mutable mid-event).
-        const aiBoostFeeRupees = Math.max(0, Number(input.aiBoost?.feeRupees ?? 0));
-        const aiBoostFeeGstPercent = Math.max(0, Number(input.aiBoost?.gstPercent ?? 0));
-        const aiBoostFeePaise = Math.round(aiBoostFeeRupees * 100);
-        const aiBoostFeeGstPaise = Math.round(aiBoostFeeRupees * (aiBoostFeeGstPercent / 100) * 100);
         return {
             platformFeePercent: input.platformFeePercent,
             platformFeeGstPercent: input.platformFeeGstPercent,
@@ -140,10 +134,6 @@ class OrderService {
             hostGstin: input.host?.gstin ?? undefined,
             hostStateCode: input.host?.registeredStateCode ?? undefined,
             currency: "INR",
-            aiBoostFeePaise,
-            aiBoostFeeGstPaise,
-            aiBoostAdjustmentMode: input.aiBoost?.adjustmentMode,
-            aiBoostOfferId: input.aiBoost?.offerId,
             capturedAt: new Date(),
         };
     }
@@ -161,10 +151,21 @@ class OrderService {
         }
         return reservedAtDate;
     }
-    assertEventBookable(event) {
+    assertEventBookable(event, viaOfflineLink = false) {
         const now = new Date();
         if (!event.ticketingEnabled) {
             throw new mercurius_1.ErrorWithProps("Ticketing is not enabled for this event");
+        }
+        // Waitlist collect-mode (waitlist-only, or the pre-sale window before
+        // waitlistExpiry): the only sanctioned purchase is a host-sent offline
+        // payment link. Presence of offlineOrderId is enough to pass here — its
+        // authenticity is enforced by the IDOR guard in createOrder, which throws
+        // on any bogus/cross-event/consumed link before an order is created.
+        if (!viaOfflineLink &&
+            event.waitlistEnabled &&
+            (event.waitlistOnly ||
+                (event.waitlistExpiry && new Date(event.waitlistExpiry) > now))) {
+            throw new mercurius_1.ErrorWithProps("Tickets for this event are released through its waitlist — join the waitlist to request a spot.");
         }
         if (event.ticketSalesStartDate && new Date(event.ticketSalesStartDate) > now) {
             throw new mercurius_1.ErrorWithProps("Ticket sales are not open yet");
@@ -526,9 +527,36 @@ class OrderService {
             quantity: t.quantity,
             unitPrice: t.unitPrice,
         }));
-        const baseline = this.cart.computePricingForLines(pricingLines, [], ticketRefs, applicationFeePercent, applicationFeeGstPercent, host, 0);
+        // Add-ons (extras) are NOT discounted by the coupon, but they ARE part of
+        // the taxable base that the platform fee + total are computed on. The
+        // preview input only carries tickets, so pull the reserved cart's extras
+        // from Redis — the SAME source createOrder prices against — so the
+        // previewed total reconciles with what the customer is actually charged.
+        // (Falls back to no extras if the cart reservation has lapsed.) Without
+        // this the preview dropped the add-on, showing a total LOWER than the
+        // Razorpay charge.
+        const storedCart = customerId
+            ? await this.cart.readStoredCart(customerId, input.eventId)
+            : null;
+        const extraPriceMap = new Map((event.extras ?? []).map((e) => [String(e._id), e]));
+        const previewExtraLines = (storedCart?.extras ?? [])
+            .map((line) => {
+            const ref = extraPriceMap.get(String(line.extraId));
+            if (!ref)
+                return null;
+            const qty = Math.max(0, Math.trunc(Number(line.quantity) || 0));
+            if (qty <= 0)
+                return null;
+            return { quantity: qty, unitPrice: Number(ref.price ?? 0) };
+        })
+            .filter(Boolean);
+        // Tickets-only subtotal (pre-discount) kept distinct from baseline.grossAmount
+        // — the latter now includes extras in the taxable base, so it can't double as
+        // the "tickets subtotal" the API field name promises.
+        const ticketsOnlySubtotal = pricingLines.reduce((sum, l) => sum + l.unitPrice * Math.max(0, Math.trunc(l.quantity)), 0);
+        const baseline = this.cart.computePricingForLines(pricingLines, previewExtraLines, ticketRefs, applicationFeePercent, applicationFeeGstPercent, host, 0);
         const baseFields = {
-            ticketsSubtotal: baseline.grossAmount,
+            ticketsSubtotal: ticketsOnlySubtotal,
             totalBefore: baseline.totalAmount,
             totalAfter: baseline.totalAmount,
         };
@@ -575,12 +603,12 @@ class OrderService {
                 ...baseFields,
                 reason: res.reason ?? "This coupon can't be applied",
             };
-        const discounted = this.cart.computePricingForLines(pricingLines, [], ticketRefs, applicationFeePercent, applicationFeeGstPercent, host, res.discountPaise);
+        const discounted = this.cart.computePricingForLines(pricingLines, previewExtraLines, ticketRefs, applicationFeePercent, applicationFeeGstPercent, host, res.discountPaise);
         return {
             ok: true,
             code,
             discountAmount: discounted.discountAmount,
-            ticketsSubtotal: baseline.grossAmount,
+            ticketsSubtotal: ticketsOnlySubtotal,
             totalBefore: baseline.totalAmount,
             totalAfter: discounted.totalAmount,
             pricing: discounted,
@@ -697,8 +725,6 @@ class OrderService {
                     hoizrCommission: 0,
                     hoizrCommissionPercent: 0,
                     razorpayFee: 0,
-                    finalDeclaredCommission: 0,
-                    finalDeclaredOfferAmount: 0,
                     appliedConfigSnapshot,
                     orderStatus: shared_1.OrderStatus.PAYMENT_SUCCESS,
                     reservedAt,
@@ -935,28 +961,9 @@ class OrderService {
             quantity: t.quantity,
             unitPrice: t.unitPrice,
         })), orderExtras.map((e) => ({ quantity: e.quantity, unitPrice: e.unitPrice })), ticketRefs, applicationFeePercent, applicationFeeGstPercent, host);
-        const selectedPlan = event.pricingSnapshot;
-        const aiCommissionPct = typeof event.aiSelectedCommissionPct === "number"
-            ? event.aiSelectedCommissionPct
-            : undefined;
-        let hoizrCommissionPercent;
-        if (typeof aiCommissionPct === "number") {
-            hoizrCommissionPercent = aiCommissionPct;
-        }
-        else if (selectedPlan) {
-            hoizrCommissionPercent = Number(selectedPlan.commissionRate ?? 0);
-        }
-        else if (Number(pricing.grossAmount ?? 0) <= 0) {
-            // Free / RSVP event — nothing is being charged, so there's no commission
-            // to take and no pricing plan is required. (A paid event with unpriced
-            // tickets still errors below because its gross is > 0.)
-            hoizrCommissionPercent = 0;
-        }
-        else {
-            throw new mercurius_1.ErrorWithProps("Event is not priced: select a pricing plan before issuing tickets.");
-        }
-        const aiBoostFeeRupees = Number(event.aiSelectedExtraAmount ?? selectedPlan?.upfrontFee ?? 0);
-        const aiBoostGstPercent = await (0, configs_cache_1.getCachedConfigNumber)(shared_1.ConfigTypeEnum.gstOnAiBoost, 18);
+        // Single fixed commission model: the event carries one frozen rate
+        // (stamped at publish, admin-editable until the event starts).
+        const hoizrCommissionPercent = Number(event.commissionRate ?? 0);
         const appliedConfigSnapshot = this.buildConfigSnapshot({
             platformFeePercent: applicationFeePercent,
             platformFeeGstPercent: applicationFeeGstPercent,
@@ -964,14 +971,6 @@ class OrderService {
             hoizrCommissionGstPercent,
             ticketGstPercent: pricing.taxesPercent,
             host,
-            aiBoost: aiBoostFeeRupees > 0
-                ? {
-                    feeRupees: aiBoostFeeRupees,
-                    gstPercent: aiBoostGstPercent,
-                    adjustmentMode: event.feeSettlementMode,
-                    offerId: event.selectedAiBoostGenerationId,
-                }
-                : undefined,
         });
         // If a customer already exists for this phone/email, attach the order to
         // their account (don't auto-create for an offline issue — the buyer
@@ -1013,8 +1012,6 @@ class OrderService {
                     hoizrCommission: 0,
                     hoizrCommissionPercent,
                     razorpayFee: 0,
-                    finalDeclaredCommission: 0,
-                    finalDeclaredOfferAmount: 0,
                     appliedConfigSnapshot,
                     orderStatus: shared_1.OrderStatus.PAYMENT_SUCCESS,
                     reservedAt: new Date(),
@@ -1172,6 +1169,11 @@ class OrderService {
         await analyticsEventsQueue.add("analytics-event", payload);
     }
     async createOrder(customerId, input) {
+        // Order-spam / inventory-lock griefing guard. Shared across first-party
+        // and open-server channels (both hit this method). 5 create attempts /
+        // customer / 10 min, and a coarser per-event burst ceiling.
+        await (0, rateLimit_1.enforceRateLimit)(`order_create_customer:${customerId}`, 5, 10 * 60);
+        await (0, rateLimit_1.enforceRateLimit)(`order_create_event:${input.eventId}`, 300, 60);
         const event = await event_schema_1.EventModel.findOne({
             _id: input.eventId,
             isDeleted: false,
@@ -1191,7 +1193,7 @@ class OrderService {
             throw new mercurius_1.ErrorWithProps("Add-ons can only be purchased together with a ticket. Add at least one ticket to continue.");
         }
         const reservedAt = this.assertCartReservationActive(stored.reservedAt);
-        this.assertEventBookable(event);
+        this.assertEventBookable(event, !!input.offlineOrderId);
         const ticketMap = new Map((event.tickets ?? []).map((t) => [String(t._id), t]));
         const extraMap = new Map((event.extras ?? []).map((e) => [String(e._id), e]));
         const orderTickets = stored.tickets.map((line) => {
@@ -1375,35 +1377,11 @@ class OrderService {
         const appliedDiscount = couponResolved && pricing.discountAmount > 0
             ? this.buildCouponSnapshot(couponResolved.coupon, pricing.discountAmount)
             : undefined;
-        // Resolve Hoizr commission first so we can include it in the config
-        // snapshot for both free and paid orders. AI-selected rate wins,
-        // fallback to the basic pricing plan; hard fail otherwise — we
-        // never silently apply a default rate.
-        const selectedPlan = event.pricingSnapshot;
-        const aiCommissionPct = typeof event.aiSelectedCommissionPct === "number"
-            ? event.aiSelectedCommissionPct
-            : undefined;
-        let hoizrCommissionPercent;
-        if (typeof aiCommissionPct === "number") {
-            hoizrCommissionPercent = aiCommissionPct;
-        }
-        else if (selectedPlan) {
-            hoizrCommissionPercent = Number(selectedPlan.commissionRate ?? 0);
-        }
-        else if (Number(grossAmount ?? 0) <= 0) {
-            // Free / RSVP order — nothing charged, no commission, no pricing plan
-            // needed. Paid orders with an unpriced event still error below.
-            hoizrCommissionPercent = 0;
-        }
-        else {
-            throw new mercurius_1.ErrorWithProps("Event is not priced: host must select a pricing plan before tickets can be sold.");
-        }
-        // AUDIT-007: lock AI Boost fee + mode at order creation. Reading
-        // these from the live Event at settlement would let a host change
-        // their active offer mid-event and have it retro-apply to orders
-        // that were paid against the old rate. Snapshot it here.
-        const aiBoostFeeRupees = Number(event.aiSelectedExtraAmount ?? selectedPlan?.upfrontFee ?? 0);
-        const aiBoostGstPercent = await (0, configs_cache_1.getCachedConfigNumber)(shared_1.ConfigTypeEnum.gstOnAiBoost, 18);
+        // Resolve Hoizr commission so we can include it in the config
+        // snapshot for both free and paid orders. Single fixed commission
+        // model: the event carries one frozen rate (stamped at publish,
+        // admin-editable until the event starts).
+        const hoizrCommissionPercent = Number(event.commissionRate ?? 0);
         const appliedConfigSnapshot = this.buildConfigSnapshot({
             platformFeePercent: applicationFeePercent,
             platformFeeGstPercent: applicationFeeGstPercent,
@@ -1411,14 +1389,6 @@ class OrderService {
             hoizrCommissionGstPercent,
             ticketGstPercent: pricing.taxesPercent,
             host,
-            aiBoost: aiBoostFeeRupees > 0
-                ? {
-                    feeRupees: aiBoostFeeRupees,
-                    gstPercent: aiBoostGstPercent,
-                    adjustmentMode: event.feeSettlementMode,
-                    offerId: event.selectedAiBoostGenerationId,
-                }
-                : undefined,
         });
         // IDOR guard (security review 2026-06-22): when linking to a host's offline
         // payment link, verify it's real, belongs to THIS event, and is still
@@ -1449,8 +1419,6 @@ class OrderService {
         }
         const hoizrCommission = +(grossAmount *
             (hoizrCommissionPercent / 100)).toFixed(2);
-        const finalDeclaredOfferAmount = Number(event.aiSelectedExtraAmount ?? selectedPlan?.upfrontFee ?? 0);
-        const finalDeclaredCommission = hoizrCommission;
         const pending = await this.reusablePendingOrder(customerId, event._id.toString(), reservedAt, pricing.totalAmount, orderTickets, orderExtras);
         if (pending) {
             const checkout = await this.ensureRazorpayOrder(pending, event._id.toString(), customerId, pricing.totalAmount);
@@ -1476,9 +1444,6 @@ class OrderService {
             hoizrCommission,
             hoizrCommissionPercent,
             razorpayFee: 0,
-            selectedOptionId: selectedPlan?.optionId,
-            finalDeclaredCommission,
-            finalDeclaredOfferAmount,
             appliedConfigSnapshot,
             orderStatus: shared_1.OrderStatus.PAYMENT_PENDING,
             reservedAt,

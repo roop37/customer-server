@@ -102,6 +102,29 @@ redisClient.defineCommand("rateLimitIncr", {
     lua: RATE_LIMIT_INCR_SCRIPT,
     numberOfKeys: 1,
 });
+/**
+ * Plain FIXED-WINDOW increment for throughput / budget caps (per-IP,
+ * per-event, global budgets). Unlike `rateLimitIncr` this applies NO
+ * exponential backoff — the TTL is always just `window`, so the counter
+ * always resets at the window boundary. Backoff is only safe for small-N
+ * brute-force caps (OTP-per-phone, max 5); on a high-volume cap it would set
+ * an astronomically large TTL (2^(n-max)·base) and permanently brick the key.
+ *
+ * Args: ARGV[1] = window (seconds). Returns the new count.
+ */
+const FIXED_WINDOW_INCR_SCRIPT = `
+local key = KEYS[1]
+local window = tonumber(ARGV[1])
+local n = redis.call('INCR', key)
+if n == 1 then
+  redis.call('EXPIRE', key, window)
+end
+return n
+`;
+redisClient.defineCommand("fixedWindowIncr", {
+    lua: FIXED_WINDOW_INCR_SCRIPT,
+    numberOfKeys: 1,
+});
 class RedisKeys {
 }
 exports.RedisKeys = RedisKeys;

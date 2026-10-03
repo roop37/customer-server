@@ -67,6 +67,18 @@ __decorate([
     (0, type_graphql_1.Field)(() => String, { nullable: true }),
     __metadata("design:type", String)
 ], UpdateCustomerProfileInput.prototype, "profilePic", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => String, { nullable: true }),
+    __metadata("design:type", String)
+], UpdateCustomerProfileInput.prototype, "instagramHandle", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => String, { nullable: true }),
+    __metadata("design:type", String)
+], UpdateCustomerProfileInput.prototype, "facebookHandle", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => String, { nullable: true }),
+    __metadata("design:type", String)
+], UpdateCustomerProfileInput.prototype, "xHandle", void 0);
 exports.UpdateCustomerProfileInput = UpdateCustomerProfileInput = __decorate([
     (0, type_graphql_1.InputType)()
 ], UpdateCustomerProfileInput);
