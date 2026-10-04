@@ -9,7 +9,7 @@ var __metadata = (this && this.__metadata) || function (k, v) {
     if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.CustomerOrderInvoice = exports.GuestCheckoutResponse = exports.PublicCoupon = exports.CouponPreviewView = exports.OfflinePaymentLinkView = exports.OfflineLinkLine = exports.CreateOrderResponse = exports.RazorpayCheckoutPayload = void 0;
+exports.GenerateInvoiceResult = exports.CustomerOrderInvoice = exports.GuestCheckoutResponse = exports.PublicCoupon = exports.CouponPreviewView = exports.OfflinePaymentLinkView = exports.OfflineLinkLine = exports.CreateOrderResponse = exports.RazorpayCheckoutPayload = void 0;
 const type_graphql_1 = require("type-graphql");
 const cart_objects_1 = require("../../cart/interfaces/cart.objects");
 const order_view_1 = require("./order.view");
@@ -268,3 +268,26 @@ __decorate([
 exports.CustomerOrderInvoice = CustomerOrderInvoice = __decorate([
     (0, type_graphql_1.ObjectType)()
 ], CustomerOrderInvoice);
+/**
+ * Result of the on-demand "get-or-generate" invoice mutation.
+ * `status` is one of:
+ *  - "READY"               → `invoice` is populated with a freshly signed link.
+ *  - "GENERATING"          → a worker is producing the PDF; client polls
+ *                            getMyOrderInvoice until it lands.
+ *  - "NO_INVOICE_FREE_ORDER" → a free / zero-booking-fee order has no tax
+ *                            invoice to issue; `invoice` is null.
+ */
+let GenerateInvoiceResult = class GenerateInvoiceResult {
+};
+exports.GenerateInvoiceResult = GenerateInvoiceResult;
+__decorate([
+    (0, type_graphql_1.Field)(() => String),
+    __metadata("design:type", String)
+], GenerateInvoiceResult.prototype, "status", void 0);
+__decorate([
+    (0, type_graphql_1.Field)(() => CustomerOrderInvoice, { nullable: true }),
+    __metadata("design:type", CustomerOrderInvoice)
+], GenerateInvoiceResult.prototype, "invoice", void 0);
+exports.GenerateInvoiceResult = GenerateInvoiceResult = __decorate([
+    (0, type_graphql_1.ObjectType)()
+], GenerateInvoiceResult);

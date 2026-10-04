@@ -1,8 +1,11 @@
 import {
+  ALL_DAYS_TICKET,
   AnalyticsEventType,
   ConfigTypeEnum,
   Coupon,
+  daySalesClosed,
   EventStatus,
+  isMultiDay,
   LifecycleSmsType,
   OrderDiscountType,
   OrderStatus,
@@ -13,7 +16,7 @@ import {
 import { getCachedConfigNumber } from "../../../utils/configs-cache";
 import { logger } from "../../../log/logger";
 import { getModelForClass, mongoose } from "@typegoose/typegoose";
-import { evaluateCoupon } from "./coupon-eval";
+import { evaluateCoupon, isLoyaltyCouponUsableBy } from "./coupon-eval";
 import { Queue } from "bullmq";
 import crypto from "crypto";
 import { ErrorWithProps } from "mercurius";
@@ -21,6 +24,7 @@ import { EnvVars } from "../../../utils/environment";
 import { signQrPayload } from "../../../utils/qr-hash";
 import { getRazorpayPayments } from "../../../utils/razorpay.client";
 import { RedisKeys, redisClient } from "../../../utils/redis";
+import { enforceRateLimit } from "../../../utils/rateLimit";
 import { isAlphanumeric } from "../../../utils/validations";
 import CartService, {
   CartTicketRef,
@@ -42,11 +46,6 @@ import { resolveCustomerForOrder } from "../../customer/service/customer-resolut
 import { InvoiceModel } from "../schema/invoice.schema";
 import { generateSignedPdfUrl } from "../../../utils/cloudinary";
 import { InvoiceType } from "@hoizr-technology/shared";
-import { nanoid } from "nanoid";
-import {
-  createCustomerAuthTokens,
-  storeCustomerRefreshToken,
-} from "../../../utils/jwt";
 
 type CreateOrderServiceResult = {
   order: Order;
@@ -169,30 +168,12 @@ class OrderService {
     host:
       | (CartHostGstContext & { registeredStateCode?: string | null })
       | null;
-    aiBoost?: {
-      feeRupees: number;
-      gstPercent: number;
-      adjustmentMode?: string;
-      offerId?: string;
-    };
   }) {
     const eligible = !!(
       input.host?.isGstRegistered &&
       input.host?.gstin &&
       (input.host?.gstRegistrationType === "REGULAR" ||
         input.host?.gstRegistrationType === "CASUAL_TAXABLE_PERSON")
-    );
-    // AUDIT-007: lock AI Boost amount + mode at order creation so the
-    // settlement reads from the order snapshot (immutable per order)
-    // instead of the live Event document (mutable mid-event).
-    const aiBoostFeeRupees = Math.max(0, Number(input.aiBoost?.feeRupees ?? 0));
-    const aiBoostFeeGstPercent = Math.max(
-      0,
-      Number(input.aiBoost?.gstPercent ?? 0)
-    );
-    const aiBoostFeePaise = Math.round(aiBoostFeeRupees * 100);
-    const aiBoostFeeGstPaise = Math.round(
-      aiBoostFeeRupees * (aiBoostFeeGstPercent / 100) * 100
     );
     return {
       platformFeePercent: input.platformFeePercent,
@@ -204,10 +185,6 @@ class OrderService {
       hostGstin: input.host?.gstin ?? undefined,
       hostStateCode: input.host?.registeredStateCode ?? undefined,
       currency: "INR",
-      aiBoostFeePaise,
-      aiBoostFeeGstPaise,
-      aiBoostAdjustmentMode: input.aiBoost?.adjustmentMode,
-      aiBoostOfferId: input.aiBoost?.offerId,
       capturedAt: new Date(),
     };
   }
@@ -230,10 +207,25 @@ class OrderService {
     return reservedAtDate;
   }
 
-  private assertEventBookable(event: any): void {
+  private assertEventBookable(event: any, viaOfflineLink = false): void {
     const now = new Date();
     if (!event.ticketingEnabled) {
       throw new ErrorWithProps("Ticketing is not enabled for this event");
+    }
+    // Waitlist collect-mode (waitlist-only, or the pre-sale window before
+    // waitlistExpiry): the only sanctioned purchase is a host-sent offline
+    // payment link. Presence of offlineOrderId is enough to pass here — its
+    // authenticity is enforced by the IDOR guard in createOrder, which throws
+    // on any bogus/cross-event/consumed link before an order is created.
+    if (
+      !viaOfflineLink &&
+      event.waitlistEnabled &&
+      (event.waitlistOnly ||
+        (event.waitlistExpiry && new Date(event.waitlistExpiry) > now))
+    ) {
+      throw new ErrorWithProps(
+        "Tickets for this event are released through its waitlist — join the waitlist to request a spot."
+      );
     }
     if (event.ticketSalesStartDate && new Date(event.ticketSalesStartDate) > now) {
       throw new ErrorWithProps("Ticket sales are not open yet");
@@ -244,7 +236,15 @@ class OrderService {
     if (event.endDate && new Date(event.endDate) < now) {
       throw new ErrorWithProps("This event has already ended.");
     }
-    if (event.startDate && new Date(event.startDate) < now && !event.allowWalkIns) {
+    // Multi-day events keep selling later days after day 1 starts; per-day
+    // closure is enforced per ticket line via daySalesClosed in createOrder
+    // (mirrors cart.setCart). The whole-event guard is single-day only.
+    if (
+      event.startDate &&
+      new Date(event.startDate) < now &&
+      !event.allowWalkIns &&
+      !isMultiDay(event)
+    ) {
       throw new ErrorWithProps(
         "Online booking has closed because the event has already started."
       );
@@ -487,6 +487,10 @@ class OrderService {
     // Event-scoped coupon (coupon.eventId set) is valid only for that event;
     // a global host promo (no eventId) works for any of the host's events.
     if (coupon.eventId && String(coupon.eventId) !== String(event._id))
+      throw new ErrorWithProps("That promo code isn't valid for this event");
+    // Loyalty coupons are personal — reject if this isn't the bound customer.
+    // Generic message so a leaked code doesn't reveal it's someone's reward.
+    if (!isLoyaltyCouponUsableBy(coupon, customerId))
       throw new ErrorWithProps("That promo code isn't valid for this event");
 
     const ticketLines = orderTickets.map((t) => ({
@@ -746,7 +750,9 @@ class OrderService {
     }).lean<any>();
     if (
       !coupon ||
-      (coupon.eventId && String(coupon.eventId) !== String(event._id))
+      (coupon.eventId && String(coupon.eventId) !== String(event._id)) ||
+      // Loyalty coupons are personal — inert for anyone but the bound customer.
+      !isLoyaltyCouponUsableBy(coupon, customerId)
     )
       return {
         ...empty,
@@ -833,6 +839,9 @@ class OrderService {
       host: String(event.hostId),
       showToCustomers: true,
       isActive: true,
+      // Never surface a personal loyalty coupon in a public listing (they are
+      // showToCustomers:false already — this is defence in depth).
+      origin: { $ne: "loyalty" },
       startDate: { $lte: now },
       endDate: { $gte: now },
       $or: [
@@ -950,8 +959,6 @@ class OrderService {
           hoizrCommission: 0,
           hoizrCommissionPercent: 0,
           razorpayFee: 0,
-          finalDeclaredCommission: 0,
-          finalDeclaredOfferAmount: 0,
           appliedConfigSnapshot,
           orderStatus: OrderStatus.PAYMENT_SUCCESS,
           reservedAt,
@@ -1076,131 +1083,9 @@ class OrderService {
     return createdOrder as Order;
   }
 
-  /**
-   * Guest checkout: a not-logged-in buyer places an order with just their
-   * contact details + selected tickets. Phone is the identity — if an
-   * account already exists we attach the order to it (and the client shows
-   * "we found your account"); otherwise we auto-create a PHONE account so the
-   * tickets live somewhere they can later log into. `guestInfo` is always
-   * stored so guest purchases are countable. Reuses the EXACT online order
-   * flow (seed cart → createOrder), so no money-path logic is duplicated.
-   */
-  /**
-   * @deprecated REMOVED from the API (2026-06-22): guest checkout no longer
-   * exists — a customer must be logged in to place ANY order. The
-   * createGuestOrder GraphQL mutation has been deleted; this method has NO
-   * caller and must not be re-exposed. Offline payment links now require login
-   * and pay through the authed createOrder (which accepts offlineOrderId).
-   */
-  async createGuestOrder(input: {
-    eventId: string;
-    tickets: { ticketId: string; quantity: number }[];
-    extras?: { extraId: string; quantity: number }[];
-    firstName: string;
-    lastName: string;
-    email: string;
-    phone: string;
-    notifyMe?: boolean;
-    offlineOrderId?: string;
-    utm?: any;
-    pageQuery?: string;
-    referralCode?: string;
-    promoterId?: string;
-    couponCode?: string;
-  }): Promise<{
-    result: CreateOrderServiceResult;
-    accountFound: boolean;
-    accountEmail?: string;
-    loggedIn: boolean;
-    session?: { accessToken: string; refreshToken: string; uniqueId: string };
-  }> {
-    if (!input.tickets?.length && !input.extras?.length) {
-      throw new ErrorWithProps("Select at least one ticket");
-    }
-    // Add-ons can't be bought on their own — require at least one ticket.
-    if (!input.tickets?.length && (input.extras?.length ?? 0) > 0) {
-      throw new ErrorWithProps(
-        "Add-ons can only be purchased together with a ticket. Add at least one ticket to continue."
-      );
-    }
-
-    const resolved = await resolveCustomerForOrder({
-      phone: input.phone,
-      email: input.email,
-      firstName: input.firstName,
-      lastName: input.lastName,
-      createIfMissing: true,
-    });
-    if (!resolved.customerId) {
-      throw new ErrorWithProps(
-        "Couldn't start checkout — please check your name, email and phone."
-      );
-    }
-
-    // NOTE: a guest purchase does exactly four things — take the contact
-    // details, create the account if the phone is new, place the order, and
-    // (for a freshly created account) log the buyer in. We deliberately do
-    // NOT silently flip marketing opt-ins here: subscribing someone to
-    // WhatsApp/email from a ticket purchase they didn't consent to is a
-    // surprise side effect. Marketing preferences are set explicitly from the
-    // profile/preferences surfaces, not as a hidden effect of checkout.
-
-    // Seed the cart for this customer, then run the normal order flow.
-    await this.cart.setCart(resolved.customerId, {
-      eventId: input.eventId,
-      tickets: input.tickets,
-      extras: input.extras ?? [],
-    });
-
-    const result = await this.createOrder(resolved.customerId, {
-      eventId: input.eventId,
-      guestInfo: {
-        firstName: input.firstName,
-        lastName: input.lastName,
-        email: input.email,
-        phone: input.phone,
-      },
-      utm: input.utm,
-      pageQuery: input.pageQuery,
-      referralCode: input.referralCode,
-      promoterId: input.promoterId,
-      couponCode: input.couponCode,
-    });
-
-    // Offline payment link → link the created order to its OfflineOrder
-    // exactly (no fuzzy matching). The OfflineOrder flips to PAID when the
-    // order finalises (post-purchase worker reads Order.offlineOrderId).
-    if (input.offlineOrderId && result.order?._id) {
-      await OrderModel.updateOne(
-        { _id: result.order._id },
-        {
-          $set: { offlineOrderId: input.offlineOrderId, source: "OFFLINE_LINK" },
-        }
-      );
-    }
-
-    // Always issue a session after guest checkout — the buyer just proved their
-    // identity by completing payment. Existing accounts skip OTP here; that's
-    // intentional (the order is already linked to their account and they've
-    // demonstrated payment-method ownership). Uses the same token utils as the
-    // OTP-verify path; the auth flow is untouched.
-    const uniqueId = nanoid();
-    const { accessToken, refreshToken } = createCustomerAuthTokens({
-      customer: resolved.customerId,
-      version: 0,
-      uniqueId,
-    });
-    await storeCustomerRefreshToken(resolved.customerId, uniqueId, refreshToken);
-    const session = { accessToken, refreshToken, uniqueId };
-
-    return {
-      result,
-      accountFound: resolved.existed,
-      accountEmail: resolved.existed ? resolved.accountEmail : undefined,
-      loggedIn: Boolean(session),
-      session,
-    };
-  }
+  // Guest checkout was REMOVED from the API (2026-06-22): a customer must be
+  // logged in to place ANY order. Offline payment links pay through the
+  // authed createOrder (which accepts offlineOrderId).
 
   /**
    * Resolve a host's offline payment-link short code → prefill payload for the
@@ -1365,33 +1250,9 @@ class OrderService {
       host
     );
 
-    const selectedPlan = event.pricingSnapshot;
-    const aiCommissionPct =
-      typeof event.aiSelectedCommissionPct === "number"
-        ? event.aiSelectedCommissionPct
-        : undefined;
-    let hoizrCommissionPercent: number;
-    if (typeof aiCommissionPct === "number") {
-      hoizrCommissionPercent = aiCommissionPct;
-    } else if (selectedPlan) {
-      hoizrCommissionPercent = Number(selectedPlan.commissionRate ?? 0);
-    } else if (Number(pricing.grossAmount ?? 0) <= 0) {
-      // Free / RSVP event — nothing is being charged, so there's no commission
-      // to take and no pricing plan is required. (A paid event with unpriced
-      // tickets still errors below because its gross is > 0.)
-      hoizrCommissionPercent = 0;
-    } else {
-      throw new ErrorWithProps(
-        "Event is not priced: select a pricing plan before issuing tickets."
-      );
-    }
-    const aiBoostFeeRupees = Number(
-      event.aiSelectedExtraAmount ?? selectedPlan?.upfrontFee ?? 0
-    );
-    const aiBoostGstPercent = await getCachedConfigNumber(
-      ConfigTypeEnum.gstOnAiBoost,
-      18
-    );
+    // Single fixed commission model: the event carries one frozen rate
+    // (stamped at publish, admin-editable until the event starts).
+    const hoizrCommissionPercent = Number(event.commissionRate ?? 0);
     const appliedConfigSnapshot = this.buildConfigSnapshot({
       platformFeePercent: applicationFeePercent,
       platformFeeGstPercent: applicationFeeGstPercent,
@@ -1399,15 +1260,6 @@ class OrderService {
       hoizrCommissionGstPercent,
       ticketGstPercent: pricing.taxesPercent,
       host,
-      aiBoost:
-        aiBoostFeeRupees > 0
-          ? {
-              feeRupees: aiBoostFeeRupees,
-              gstPercent: aiBoostGstPercent,
-              adjustmentMode: event.feeSettlementMode,
-              offerId: event.selectedAiBoostGenerationId,
-            }
-          : undefined,
     });
 
     // If a customer already exists for this phone/email, attach the order to
@@ -1451,8 +1303,6 @@ class OrderService {
           hoizrCommission: 0,
           hoizrCommissionPercent,
           razorpayFee: 0,
-          finalDeclaredCommission: 0,
-          finalDeclaredOfferAmount: 0,
           appliedConfigSnapshot,
           orderStatus: OrderStatus.PAYMENT_SUCCESS,
           reservedAt: new Date(),
@@ -1569,12 +1419,12 @@ class OrderService {
     // CUSTOMER_ORDER_PLACED email here would double-mail the customer. Only
     // the SMS + analytics fire from this path now.
     if (recipientPhone) {
+      // Dormant: skipped until a MSG91 template is registered for this key.
       await lifecycleSmsQueue.add(LifecycleSmsType.CUSTOMER_ORDER_PLACED, {
         phoneNumber: recipientPhone,
-        message: `Your Hoizr booking is confirmed. Order #${order._id
-          .toString()
-          .slice(-6)
-          .toUpperCase()}. Check email/app for your QR.`,
+        variables: {
+          orderId: order._id.toString().slice(-6).toUpperCase(),
+        },
       });
     }
 
@@ -1649,6 +1499,12 @@ class OrderService {
     customerId: string,
     input: CreateOrderInput
   ): Promise<CreateOrderServiceResult> {
+    // Order-spam / inventory-lock griefing guard. Shared across first-party
+    // and open-server channels (both hit this method). 5 create attempts /
+    // customer / 10 min, and a coarser per-event burst ceiling.
+    await enforceRateLimit(`order_create_customer:${customerId}`, 5, 10 * 60);
+    await enforceRateLimit(`order_create_event:${input.eventId}`, 300, 60);
+
     const event = await EventModel.findOne({
       _id: input.eventId,
       isDeleted: false,
@@ -1670,7 +1526,7 @@ class OrderService {
       );
     }
     const reservedAt = this.assertCartReservationActive(stored.reservedAt);
-    this.assertEventBookable(event);
+    this.assertEventBookable(event, !!input.offlineOrderId);
 
     const ticketMap = new Map(
       (event.tickets ?? []).map((t) => [String(t._id), t])
@@ -1696,6 +1552,17 @@ class OrderService {
         new Date(ref.ticketExpiryDateTime) < new Date()
       ) {
         throw new ErrorWithProps(`${ref.ticketName} is no longer on sale`);
+      }
+      // Multi-day: a day's tickets stop selling at that day's start (all-days
+      // pass at the earliest day start). Re-checked here because the cart can
+      // be up to 13 min older than the order.
+      if (
+        isMultiDay(event as any) &&
+        daySalesClosed(event as any, ref.dayId ?? ALL_DAYS_TICKET, new Date())
+      ) {
+        throw new ErrorWithProps(
+          `Sales for ${ref.ticketName} have closed — pick another day.`
+        );
       }
       if (ref.maxTicketPerUser && line.quantity > ref.maxTicketPerUser) {
         throw new ErrorWithProps(
@@ -1750,6 +1617,21 @@ class OrderService {
       const available = Number(ref.quantity ?? 0) - Number(ref.sold ?? 0);
       if (line.quantity > available) {
         throw new ErrorWithProps(`${ref.name ?? "Add-on"} is no longer available`);
+      }
+      // HoizrExtra.linkedTicketTypes: extra scoped to specific ticket types may
+      // only be bought alongside one of those tickets (empty ⇒ any). Mirrors
+      // the cart.setCart guard — re-checked on the authoritative order path.
+      const linked = ((ref as any).linkedTicketTypes ?? []) as string[];
+      if (
+        line.quantity > 0 &&
+        linked.length > 0 &&
+        !stored.tickets.some(
+          (t) => t.quantity > 0 && linked.includes(t.ticketId)
+        )
+      ) {
+        throw new ErrorWithProps(
+          `"${ref.name ?? "This add-on"}" can only be added along with a qualifying ticket`
+        );
       }
       const unitPrice = Number(ref.price ?? 0);
       // AUDIT-003: stale extras pricing — same shape as the ticket
@@ -1896,42 +1778,11 @@ class OrderService {
         ? this.buildCouponSnapshot(couponResolved.coupon, pricing.discountAmount)
         : undefined;
 
-    // Resolve Hoizr commission first so we can include it in the config
-    // snapshot for both free and paid orders. AI-selected rate wins,
-    // fallback to the basic pricing plan; hard fail otherwise — we
-    // never silently apply a default rate.
-    const selectedPlan = event.pricingSnapshot;
-    const aiCommissionPct =
-      typeof event.aiSelectedCommissionPct === "number"
-        ? event.aiSelectedCommissionPct
-        : undefined;
-
-    let hoizrCommissionPercent: number;
-    if (typeof aiCommissionPct === "number") {
-      hoizrCommissionPercent = aiCommissionPct;
-    } else if (selectedPlan) {
-      hoizrCommissionPercent = Number(selectedPlan.commissionRate ?? 0);
-    } else if (Number(grossAmount ?? 0) <= 0) {
-      // Free / RSVP order — nothing charged, no commission, no pricing plan
-      // needed. Paid orders with an unpriced event still error below.
-      hoizrCommissionPercent = 0;
-    } else {
-      throw new ErrorWithProps(
-        "Event is not priced: host must select a pricing plan before tickets can be sold."
-      );
-    }
-
-    // AUDIT-007: lock AI Boost fee + mode at order creation. Reading
-    // these from the live Event at settlement would let a host change
-    // their active offer mid-event and have it retro-apply to orders
-    // that were paid against the old rate. Snapshot it here.
-    const aiBoostFeeRupees = Number(
-      event.aiSelectedExtraAmount ?? selectedPlan?.upfrontFee ?? 0
-    );
-    const aiBoostGstPercent = await getCachedConfigNumber(
-      ConfigTypeEnum.gstOnAiBoost,
-      18
-    );
+    // Resolve Hoizr commission so we can include it in the config
+    // snapshot for both free and paid orders. Single fixed commission
+    // model: the event carries one frozen rate (stamped at publish,
+    // admin-editable until the event starts).
+    const hoizrCommissionPercent = Number(event.commissionRate ?? 0);
 
     const appliedConfigSnapshot = this.buildConfigSnapshot({
       platformFeePercent: applicationFeePercent,
@@ -1940,15 +1791,6 @@ class OrderService {
       hoizrCommissionGstPercent,
       ticketGstPercent: pricing.taxesPercent,
       host,
-      aiBoost:
-        aiBoostFeeRupees > 0
-          ? {
-              feeRupees: aiBoostFeeRupees,
-              gstPercent: aiBoostGstPercent,
-              adjustmentMode: event.feeSettlementMode,
-              offerId: event.selectedAiBoostGenerationId,
-            }
-          : undefined,
     });
 
     // IDOR guard (security review 2026-06-22): when linking to a host's offline
@@ -1997,11 +1839,6 @@ class OrderService {
       (hoizrCommissionPercent / 100)
     ).toFixed(2);
 
-    const finalDeclaredOfferAmount = Number(
-      event.aiSelectedExtraAmount ?? selectedPlan?.upfrontFee ?? 0
-    );
-    const finalDeclaredCommission = hoizrCommission;
-
     const pending = await this.reusablePendingOrder(
       customerId,
       event._id.toString(),
@@ -2041,9 +1878,6 @@ class OrderService {
       hoizrCommission,
       hoizrCommissionPercent,
       razorpayFee: 0,
-      selectedOptionId: selectedPlan?.optionId,
-      finalDeclaredCommission,
-      finalDeclaredOfferAmount,
       appliedConfigSnapshot,
       orderStatus: OrderStatus.PAYMENT_PENDING,
       reservedAt,
@@ -2186,8 +2020,13 @@ class OrderService {
       customerId,
       isDeleted: false,
     })
-      .select("_id platformFee")
-      .lean<{ _id: any; platformFee?: number }>();
+      .select("_id platformFee source razorpayPaymentId")
+      .lean<{
+        _id: any;
+        platformFee?: number;
+        source?: string;
+        razorpayPaymentId?: string;
+      }>();
     if (!order) throw new ErrorWithProps("Order not found");
 
     // Already issued (and not voided) → hand back a freshly-signed link.
@@ -2195,9 +2034,15 @@ class OrderService {
     if (existing) return { status: "READY", invoice: existing };
 
     // A free / zero-booking-fee order has no tax invoice to issue — only the
-    // booking fee + its GST is invoiced. Matches the worker generator's own
-    // null short-circuit, so don't enqueue (it would never resolve).
-    if (Number(order.platformFee ?? 0) <= 0) {
+    // booking fee + its GST is invoiced. Same for host-issued CASH orders:
+    // the booking fee was never collected by Hoizr. Both match the worker
+    // generator's null short-circuits, so don't enqueue (it would never
+    // resolve and the client would poll forever).
+    if (
+      Number(order.platformFee ?? 0) <= 0 ||
+      order.source === "OFFLINE_ISSUED" ||
+      /^(offline_|free_)/.test(String(order.razorpayPaymentId ?? ""))
+    ) {
       return { status: "NO_INVOICE_FREE_ORDER", invoice: null };
     }
 

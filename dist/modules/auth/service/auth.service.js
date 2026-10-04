@@ -17,7 +17,7 @@ class AuthService {
     constructor() {
         this.otp = new otp_service_1.default();
     }
-    async requestOtp(input) {
+    async requestOtp(input, opts) {
         const normalized = (0, validations_1.normalizeCustomerPhone)(input.phone);
         if (!normalized) {
             throw new mercurius_1.ErrorWithProps("Invalid phone number");
@@ -31,6 +31,16 @@ class AuthService {
             throw new mercurius_1.ErrorWithProps("Too many OTP requests for this number. Try again later.");
         }
         await (0, rateLimit_1.incrementRateLimit)(rlKey);
+        // Per-IP cap: blunts a botnet rotating phone numbers from one origin.
+        // 10 OTP requests / 10 min / IP. Shared across first-party and
+        // open-server channels (both call this method).
+        if (opts?.ip) {
+            await (0, rateLimit_1.enforceRateLimit)(`customer_otp_ip:${opts.ip}`, 10, 10 * 60);
+        }
+        // Global SMS/OTP budget: a platform-wide circuit breaker so total OTP
+        // spend can't be drained even across many IPs. 5000 / day (tune via
+        // Configs later). Keyed on a rolling 24h window.
+        await (0, rateLimit_1.enforceRateLimit)(`customer_otp_global`, 5000, 24 * 60 * 60);
         // Dual-lookup: match by either E.164 (post-backfill records) OR raw
         // input (pre-backfill records whose `phone` is still in legacy form).
         // Backfill script in internal-utility-scripts/ migrates everyone to

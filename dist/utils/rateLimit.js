@@ -1,6 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.resetRateLimit = exports.incrementRateLimit = exports.checkRateLimit = void 0;
+exports.enforceRateLimit = exports.makeEnforceRateLimit = exports.resetRateLimit = exports.incrementRateLimit = exports.checkRateLimit = void 0;
+const mercurius_1 = require("mercurius");
 const redis_1 = require("./redis");
 /**
  * Per-key sliding-window rate limiter backed by Redis. Mirrors the
@@ -56,3 +57,31 @@ const resetRateLimit = async (rlKey) => {
     }
 };
 exports.resetRateLimit = resetRateLimit;
+/**
+ * Atomic "increment then throw if over limit" for throughput / budget caps
+ * (per-IP, global budgets, order-spam). Uses a FIXED-WINDOW Lua
+ * (`fixedWindowIncr`) — NOT the exponential-backoff `rateLimitIncr`. Backoff
+ * is only safe for small-N brute-force caps (OTP-per-phone, max 5); on a
+ * high-volume cap (e.g. 5000/day budget) exceeding the max would set a
+ * multi-year TTL and permanently brick the key. Fixed window always resets at
+ * `windowSeconds`. Fail-closed: a Redis error rejects rather than letting
+ * abuse through.
+ *
+ * `makeEnforceRateLimit` is exported for tests to inject a fake redis; the
+ * bound `enforceRateLimit` uses the real client.
+ */
+const makeEnforceRateLimit = (client) => async (key, max, windowSeconds) => {
+    let count;
+    try {
+        count = await client.fixedWindowIncr(`${RL_PREFIX}:${key}`, windowSeconds);
+    }
+    catch (error) {
+        console.error("rateLimit:enforce failed", error);
+        throw new mercurius_1.ErrorWithProps("Service busy, please try again shortly.");
+    }
+    if (count > max) {
+        throw new mercurius_1.ErrorWithProps("Too many requests, please try again later.");
+    }
+};
+exports.makeEnforceRateLimit = makeEnforceRateLimit;
+exports.enforceRateLimit = (0, exports.makeEnforceRateLimit)(redis_1.redisClient);

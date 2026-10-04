@@ -28,8 +28,8 @@ let AuthResolver = class AuthResolver {
         this.service = new auth_service_1.default();
         this.oauth = new oauth_service_1.default();
     }
-    async customerRequestOtp(input) {
-        return this.service.requestOtp(input);
+    async customerRequestOtp(input, ctx) {
+        return this.service.requestOtp(input, { ip: ctx.req.ip });
     }
     async customerVerifyOtp(input, ctx) {
         const result = await this.service.verifyOtp(input);
@@ -115,8 +115,9 @@ exports.AuthResolver = AuthResolver;
 __decorate([
     (0, type_graphql_1.Mutation)(() => auth_objects_1.CustomerOtpResponse),
     __param(0, (0, type_graphql_1.Arg)("input")),
+    __param(1, (0, type_graphql_1.Ctx)()),
     __metadata("design:type", Function),
-    __metadata("design:paramtypes", [auth_input_1.CustomerOtpRequestInput]),
+    __metadata("design:paramtypes", [auth_input_1.CustomerOtpRequestInput, Object]),
     __metadata("design:returntype", Promise)
 ], AuthResolver.prototype, "customerRequestOtp", null);
 __decorate([

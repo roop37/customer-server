@@ -135,9 +135,14 @@ class CartService {
         if (event.endDate && new Date(event.endDate) < now) {
             throw new mercurius_1.ErrorWithProps("This event has already ended.");
         }
+        // Multi-day events keep selling later days after day 1 starts — per-day
+        // closure is enforced by daySalesClosed below (mirrors the client's
+        // ticketSalesClosed gating). The whole-event "already started" guard only
+        // applies to single-day events.
         if (event.startDate &&
             new Date(event.startDate) < now &&
-            !event.allowWalkIns) {
+            !event.allowWalkIns &&
+            !(0, shared_1.isMultiDay)(event)) {
             throw new mercurius_1.ErrorWithProps("Online booking has closed because the event has already started.");
         }
         const ticketMap = new Map((event.tickets ?? []).map((t) => [String(t._id), t]));
@@ -184,6 +189,14 @@ class CartService {
             }
             if (line.quantity < 0)
                 throw new mercurius_1.ErrorWithProps("Quantity cannot be negative");
+            // HoizrExtra.linkedTicketTypes: an extra scoped to specific ticket types
+            // may only be bought alongside one of those tickets (empty ⇒ any ticket).
+            const linked = (extra.linkedTicketTypes ?? []);
+            if (line.quantity > 0 &&
+                linked.length > 0 &&
+                !input.tickets.some((t) => t.quantity > 0 && linked.includes(t.ticketId))) {
+                throw new mercurius_1.ErrorWithProps(`"${extra.name ?? "This add-on"}" can only be added along with a qualifying ticket`);
+            }
         }
         const existing = await this.readStoredCart(customerId, input.eventId);
         const reservationStart = existing?.reservedAt

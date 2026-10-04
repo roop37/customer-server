@@ -12,13 +12,13 @@
     "build": "tsc"
   },
   "author": "Sanbedan Paul",
-  "license": "ISC",
+  "license": "MIT",
   "dependencies": {
     "@fastify/cookie": "^11.0.1",
     "@fastify/cors": "^10.0.1",
     "@fastify/helmet": "^12.0.1",
     "@graphql-tools/schema": "^10.0.4",
-    "@hoizr-technology/shared": "^0.1.108",
+    "@hoizr-technology/shared": "^0.1.121",
     "@typegoose/typegoose": "^12.10.1",
     "axios": "^1.7.2",
     "bcrypt": "^5.1.1",

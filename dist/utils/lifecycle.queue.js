@@ -13,9 +13,20 @@ const lifecycleEmailQueue = new bullmq_1.Queue(shared_1.QueueNames.lifecycleEmai
         removeOnFail: 50,
     },
 });
-const enqueueLifecycleEmail = async (type, to, name, data) => {
+const enqueueLifecycleEmail = async (type, to, name, data, 
+/** Optional inline/attached files (e.g. a golden-pass QR via cid). */
+attachments) => {
     if (!to)
         return;
-    await lifecycleEmailQueue.add(type, { type, to, name, data });
+    // `attachments` isn't on the published LifecycleEmailJob type yet (no
+    // republish for this change); the lifecycle-email worker already reads it
+    // off the job. Cast so the extra field rides along to the worker.
+    await lifecycleEmailQueue.add(type, {
+        type,
+        to,
+        name,
+        data,
+        attachments,
+    });
 };
 exports.enqueueLifecycleEmail = enqueueLifecycleEmail;

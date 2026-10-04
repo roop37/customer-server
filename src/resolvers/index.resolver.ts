@@ -13,6 +13,9 @@ import { OrderResolver } from "../modules/order/resolver/order.resolver";
 import { CustomerFeedbackResolver } from "../modules/feedback/resolver/feedback.resolver";
 import { ScannerResolver } from "../modules/scanner/resolver/scanner.resolver";
 import { GuestlistResolver } from "../modules/guestlist/resolver/guestlist.resolver";
+import { CustomerLoyaltyResolver } from "../modules/loyalty/resolver/loyalty.resolver";
+import { WaitlistResolver } from "../modules/waitlist/resolver/waitlist.resolver";
+import { SwiggyDineoutResolver } from "../modules/dineout/resolver/swiggy-dineout.resolver";
 
 export const resolvers: NonEmptyArray<Function> = [
   AuthResolver,
@@ -29,4 +32,7 @@ export const resolvers: NonEmptyArray<Function> = [
   ArtistFollowResolver,
   ArtistMerchOrderResolver,
   GuestlistResolver,
+  CustomerLoyaltyResolver,
+  WaitlistResolver,
+  SwiggyDineoutResolver,
 ];

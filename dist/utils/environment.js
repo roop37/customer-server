@@ -73,11 +73,39 @@ const zodEnvSchema = zod_1.z.object({
     META_INSTAGRAM_STATE_SECRET: zod_1.z.string().optional(),
     META_INSTAGRAM_TOKEN_KEY: zod_1.z.string().optional(),
     META_INSTAGRAM_FRONTEND_RETURN: zod_1.z.string().optional(),
+    // --- Swiggy Dineout MCP (connect-only; dev-gated until production access) ---
+    // All optional so boot never breaks when unset. `isSwiggyDineoutReady()`
+    // (modules/dineout/config.ts) gates on the flag AND the required secrets.
+    // SWIGGY_CLIENT_ID comes from one-time Dynamic Client Registration
+    // (POST /auth/register), NOT a Swiggy-issued id; no client secret exists.
+    // SWIGGY_TOKEN_ENCRYPTION_KEY: 64-hex (32 bytes) — `openssl rand -hex 32`.
+    SWIGGY_DINEOUT_ENABLED: zod_1.z.string().optional().default("false"),
+    SWIGGY_CLIENT_ID: zod_1.z.string().optional(),
+    SWIGGY_OAUTH_REDIRECT_URI: zod_1.z.string().optional(),
+    SWIGGY_MCP_BASE: zod_1.z.string().optional().default("https://mcp.swiggy.com"),
+    SWIGGY_TOKEN_ENCRYPTION_KEY: zod_1.z.string().optional(),
+    // Absolute hoizr-client URL to bounce back to after the OAuth handshake.
+    // The callback runs on the API origin, but /dineout is on the frontend
+    // origin — must be absolute cross-host (e.g. https://dev.hoizr.com/dineout).
+    SWIGGY_FRONTEND_RETURN: zod_1.z.string().optional(),
+    // Reservation confirmation/reminder notifications for Swiggy Dineout
+    // bookings (own-customer, transactional only — see reservation-notify.ts).
+    // Default off until posture is confirmed; flippable without a deploy.
+    SWIGGY_DINEOUT_REMINDERS_ENABLED: zod_1.z.string().optional().default("false"),
+    // Meta-approved WhatsApp template names. Dormant until both isWhatsAppLive()
+    // AND the relevant template env are set — no template configured yet.
+    WHATSAPP_DINEOUT_CONFIRM_TEMPLATE: zod_1.z.string().optional(),
+    WHATSAPP_DINEOUT_REMINDER_TEMPLATE: zod_1.z.string().optional(),
     // Google Maps server-side key used by the address-autocomplete
     // queries on /me/profile. Optional — when unset, the resolver
     // surfaces a clear error so misconfigured environments fail loud
     // rather than 200-OKing with empty results.
     MAPS_API_KEY: zod_1.z.string().optional(),
+    // Waitlist social collection: while Meta app verification is pending we
+    // collect plain-string handles at waitlist-join instead of the verified
+    // Instagram Connect. Flip to "true" once verified to switch to Connect.
+    // Source of truth for the gate — hoizr-client reads a mirror for UI only.
+    META_VERIFIED: zod_1.z.string().optional().default("false"),
 });
 class EnvVars {
     static initialize() {

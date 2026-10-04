@@ -39,6 +39,20 @@ export type CouponEvalResult = {
   reason?: string;
 };
 
+/**
+ * A loyalty coupon (`origin: "loyalty"`, minted when a customer spends points)
+ * is PERSONAL — usable only by the customer it was bound to. Any other origin
+ * (normal host promo) is unrestricted here. Keep this pure + reused by every
+ * checkout apply path so a leaked/shared loyalty code is inert for everyone else.
+ */
+export const isLoyaltyCouponUsableBy = (
+  coupon: any,
+  customerId?: string
+): boolean => {
+  if (coupon?.origin !== "loyalty") return true;
+  return String(coupon?.boundCustomerId ?? "") === String(customerId ?? "");
+};
+
 export const evaluateCoupon = (
   coupon: any,
   ctx: CouponEvalContext

@@ -49,6 +49,7 @@ const type_graphql_1 = require("type-graphql");
 const logger_1 = require("./log/logger");
 const index_resolver_1 = require("./resolvers/index.resolver");
 const instagram_oauth_route_1 = require("./routes/instagram-oauth.route");
+const swiggy_oauth_route_1 = require("./routes/swiggy-oauth.route");
 const internal_offline_order_route_1 = require("./routes/internal-offline-order.route");
 const razorpay_webhook_route_1 = require("./routes/razorpay-webhook.route");
 const cookie_2 = require("./utils/cookie");
@@ -57,7 +58,14 @@ const environment_1 = require("./utils/environment");
 const helper_1 = require("./utils/helper");
 const jwt_1 = require("./utils/jwt");
 dotenv_1.default.config();
-const app = (0, fastify_1.default)({ logger: false });
+// trustProxy so req.ip is the real client behind the LB/CDN — the per-IP OTP
+// cap (auth.service) depends on it; without it every user shares the proxy IP
+// and the cap locks out everyone at once. `true` trusts X-Forwarded-For (safe
+// only if the LB strips inbound XFF). ponytail: set to the real hop count at
+// deploy if the LB does NOT strip inbound XFF, else clients can spoof it. The
+// per-phone + global OTP caps still bind regardless, so a spoofed IP only
+// evades the per-IP layer — it can't drain the SMS budget.
+const app = (0, fastify_1.default)({ logger: false, trustProxy: true });
 async function startServer() {
     try {
         await (0, dbConnection_1.connectToMongoDb)();
@@ -192,6 +200,7 @@ async function startServer() {
         (0, razorpay_webhook_route_1.registerRazorpayWebhook)(app);
         (0, internal_offline_order_route_1.registerInternalOfflineOrderRoute)(app);
         (0, instagram_oauth_route_1.registerInstagramOAuth)(app);
+        (0, swiggy_oauth_route_1.registerSwiggyOAuth)(app);
         app.get("/", async (_req, res) => {
             res.status(200).send("Hoizr customer-server healthy");
         });
